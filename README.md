@@ -10,8 +10,9 @@ consumer (a historian, an MES bridge, the edge console) then connects to **one**
 
 Unlike a dumb broker bridge it is envelope-aware: it stamps a **hop tag** for loop protection,
 rewrites `reply_to` so site→device request/reply crosses the bridge (the TTL'd correlation map,
-§2.4), rate-caps the data plane (P3-4), and registers a Last-Will `UNREACHABLE` on the site
-connection for fast whole-device reachability detection.
+§2.4), applies a **per-class uplink policy** — enables, token-bucket rate caps, and a bounded
+`evt` replay buffer for WAN blips (§2.5 / D-B10) — and registers a Last-Will `UNREACHABLE` on the
+site connection for fast whole-device reachability detection.
 
 Design source of truth: `docs/platform/DESIGN-uns-bridge.md` (and `DESIGN-uns.md` §9) in the
 ggcommons monorepo. Section references below (§…) point there.
@@ -80,6 +81,34 @@ the reply path:
    **1024**): overflow **evicts the oldest** entry (expired early + counted) rather than refusing
    fresh commands. Stray/late replies with no live entry are dropped + counted.
 
+### Per-class uplink policy (§2.5 / D-B10)
+
+Every uplink-forwardable message passes a **pure policy engine** (`src/policy.rs`) after the relay
+decision:
+
+- **Enable/disable** — any of the seven uplinkable classes can be switched off
+  (`uplink.classes.<class>.enabled`); a disabled class's messages **drop + count**
+  (`dropped_disabled`, per class). Defaults: `app` **off** (opt-in — off also means the seventh
+  filter is never subscribed), every other class **on**. (§2.5 recommends shipping `log` off — the
+  sample config does — but the code default keeps it on, matching the P3-2/P3-3 behavior.)
+- **Rate caps** — a token bucket per rate-capped class: `maxRatePerSec` refill, `burst` capacity
+  (default `2×rate`; the bucket starts full). Over-cap traffic **drops** — never queues; the live
+  UNS path is deliberately not durable (durability = the streaming subsystem's job) — counted per
+  class (`dropped_rate`). The bucket's clock is injected, so the math is fully deterministic under
+  test.
+- **Disconnect behavior** (D-B10) — while the site link is down (`connected()` false **or** a site
+  publish fails), every class **drops + counts** (`dropped_disconnected`, per class) **except
+  `evt`**: events/alarms ride a bounded, memory-only, **drop-oldest** replay buffer
+  (`bufferWhileDisconnected`, default **on**, **1000**) — a WAN blip must not lose an alarm
+  raise/clear. On reconnect a watcher task replays the buffered `evt` **strictly in order**
+  (topic-verbatim, hop tag already stamped) and the buffer clears (`evt_replayed`); overflow while
+  down evicts the oldest (`evt_buffer_dropped`). A live `evt` arriving while older ones are still
+  queued joins the queue rather than overtaking them.
+- **Not yet** (the next slice): on the reconnect rising edge the bridge will also broadcast
+  `republish-state`/`republish-cfg` on the device bus (`ecv1/{device}/_bcast/main/cmd/…`) so the
+  site view rehydrates `state`/`cfg` without retain (DESIGN-uns §9.3 layer 2) — a documented TODO
+  at the connectivity watcher in `src/io.rs`.
+
 ## Configuration (§2.7)
 
 The site broker lives in the bridge's **own** `component.instances[]` — the existing per-instance
@@ -102,7 +131,12 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
                         "credentials": { "certPath": "…", "keyPath": "…", "caPath": "…" } },
         "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state",     // §2.6: whole-device UNREACHABLE
                  "payload": { "status": "UNREACHABLE" }, "qos": 1 },
-        "uplink": { "classes": { "app": { "enabled": false } } }, // P3-2 honors the app opt-in
+        "uplink": { "classes": {                                  // §2.5 per-class policy (all knobs optional)
+            "log":  { "enabled": false },
+            "metric": { "maxRatePerSec": 50 },                    // burst defaults to 2× rate
+            "data": { "maxRatePerSec": 200, "burst": 400 },
+            "evt":  { "bufferWhileDisconnected": { "maxMessages": 1000 } },  // D-B10 (default on, 1000)
+            "app":  { "enabled": false } } },                     // opt-in seventh class
         "reply":  { "ttlSecs": 60, "maxPending": 1024 },          // §2.4 correlation map (paired knob: 2× requestTimeoutSeconds)
         "maxHops": 4,
         "queue":  { "data": 512, "default": 64 } }                // per-class max_messages
@@ -113,11 +147,12 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
 
 Notes for the current slice: values are concrete (template substitution like `{ThingName}` arrives
 with the full facade integration); the `lwt` entry is already applied at CONNECT by the reused
-provider (the startup topic cross-check lands in P3-4); `uplink` per-class enables/rate-caps/buffers
-are parsed and carried but enforced in P3-4 (only `classes.app.enabled` is honored today); the
-`reply` knobs are fully enforced (P3-3). The relay/reply counters (`reply_relayed`,
-`reply_expired`, `reply_stray`, the `pending_replies` gauge, …) are held in-process and logged at
-shutdown; publishing them as `metric`s lands in P3-4 (§2.5 table).
+provider (the startup topic cross-check lands in P3-4b); the `uplink` policy (per-class
+enables/rate caps + the `evt` replay buffer, §2.5 / D-B10) and the `reply` knobs (§2.4) are fully
+enforced. The relay/reply/policy counters (`uplinked`, `dropped_disabled`/`dropped_rate`/
+`dropped_disconnected` per class, `evt_buffered`/`evt_buffer_dropped`/`evt_replayed`,
+`reply_relayed`, `reply_expired`, `reply_stray`, the `pending_replies` gauge, …) are held
+in-process and logged at shutdown; publishing them as `metric`s lands in P3-4b (§2.5 table).
 
 ## Run locally (HOST)
 
@@ -155,8 +190,9 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 |---|---|
 | `src/relay.rs` | The **pure** relay decision engine: §2.2 class routing + own-device pinning, §2.3 hop tag — no IO, fully unit-tested |
 | `src/reply.rs` | The **pure** §2.4 reply proxy logic: the TTL'd correlation map (`rewrite_downlink`/`take`/`sweep`, evict-oldest) + the reply back-haul transform — no IO, injected clock |
-| `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` (+ the reply rewrite on the downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep task; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
-| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; typed `reply` knobs |
+| `src/policy.rs` | The **pure** §2.5/D-B10 uplink policy: per-class enables, token buckets (injected clock), and the bounded drop-oldest `evt` replay buffer — no IO |
+| `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (evt replay); counters; unsubscribe-on-shutdown (incl. pending reply topics) |
+| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; typed `reply` + `uplink` knobs |
 | `src/main.rs` | Two connections (primary fatal, site retried), signal handling, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs (finalized in P3-5/P3-6) |
@@ -167,7 +203,8 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 |---|---|---|
 | **P3-2** | repo scaffold; relay engine (six uplink filters + pinned downlink, topic-verbatim, hop tag/maxHops); unit tests over trait fakes | **done** |
 | **P3-3** | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | **done** |
-| P3-4 | per-class uplink policy (enable/rate caps/evt buffer), drop-counter **metrics**, reconnect `republish-*` broadcast rehydration, LWT startup cross-check | pending |
+| **P3-4** | per-class uplink policy: enables, token-bucket rate caps, D-B10 disconnect behavior + the bounded drop-oldest `evt` replay buffer with in-order reconnect replay; per-class drop counters | **done** |
+| P3-4b | counters published as `metric`s (§2.5 table) + the bridge's own GgCommons observability; reconnect `republish-*` `_bcast` rehydration (needs the library's Phase-3 broadcast listener); LWT startup cross-check | pending |
 | P3-5 | `deploy/site-broker/` recipes (HOST compose, GG DockerApplicationManager, k8s boundary notes, the per-device **ACL** file) | pending |
 | P3-6 | registry entry, docs-site sync, dual-EMQX e2e + 3-platform validation | pending |
 

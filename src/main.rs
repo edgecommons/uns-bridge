@@ -30,6 +30,7 @@
 
 mod config;
 mod io;
+mod policy;
 mod relay;
 mod reply;
 
@@ -191,16 +192,34 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // The relay: six (+1) uplink pumps + the pinned downlink pump + the §2.4
-    // reply proxy (correlation map + TTL sweep).
-    let relay =
-        io::RelayIo::start(engine, primary, site, &site_entry.queue, &site_entry.reply).await?;
+    // The relay: six (+1) uplink pumps through the §2.5 policy + the pinned
+    // downlink pump + the §2.4 reply proxy (correlation map + TTL sweep) + the
+    // §2.5/D-B10 connectivity watcher (evt replay).
+    let relay = io::RelayIo::start(
+        engine,
+        primary,
+        site,
+        &site_entry.queue,
+        &site_entry.reply,
+        &site_entry.uplink,
+    )
+    .await?;
     tracing::info!("relay running");
 
     shutdown_signal().await;
     tracing::info!("shutdown signal received; stopping relay");
 
-    let (uplinked, downlinked, loop_dropped, reply_relayed, reply_expired) = {
+    let (
+        uplinked,
+        downlinked,
+        loop_dropped,
+        reply_relayed,
+        reply_expired,
+        dropped_disabled,
+        dropped_rate,
+        dropped_disconnected,
+        evt_replayed,
+    ) = {
         use std::sync::atomic::Ordering;
         let c = relay.counters();
         (
@@ -209,9 +228,14 @@ async fn main() -> anyhow::Result<()> {
             c.loop_dropped.load(Ordering::Relaxed),
             c.reply_relayed.load(Ordering::Relaxed),
             c.reply_expired.load(Ordering::Relaxed),
+            c.dropped_disabled.total(),
+            c.dropped_rate.total(),
+            c.dropped_disconnected.total(),
+            c.evt_replayed.load(Ordering::Relaxed),
         )
     };
     let pending_replies = relay.pending_replies();
+    let buffered_evt = relay.buffered_evt();
     relay.shutdown().await; // aborts pumps + unsubscribes everything at both brokers
     tracing::info!(
         uplinked,
@@ -219,6 +243,11 @@ async fn main() -> anyhow::Result<()> {
         loop_dropped,
         reply_relayed,
         reply_expired,
+        dropped_disabled,
+        dropped_rate,
+        dropped_disconnected,
+        evt_replayed,
+        buffered_evt,
         pending_replies,
         "uns-bridge stopped"
     );

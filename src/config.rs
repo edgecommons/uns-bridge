@@ -10,11 +10,11 @@
 //! by the **core's own** `MqttProvider::connect` — no new schema, no core change
 //! (DESIGN-uns-bridge §1.1/§1.2).
 //!
-//! Sections the later slices own are parsed and carried but not yet enforced:
-//! `uplink` per-class enable/rate-caps/buffers (P3-4 — only `classes.app.enabled`
-//! is honored today), `lwt` (applied at CONNECT by the reused provider already;
-//! the startup topic cross-check is P3-4). The `reply` knobs ([`ReplyConfig`])
-//! are enforced since P3-3 (the `reply_to` rewrite, [`crate::reply`]).
+//! The `uplink` block ([`UplinkConfig`]) is fully typed and enforced since P3-4
+//! (per-class enable/rate-caps + the D-B10 `evt` replay buffer —
+//! [`crate::policy`]); the `reply` knobs ([`ReplyConfig`]) are enforced since
+//! P3-3 (the `reply_to` rewrite, [`crate::reply`]). `lwt` is applied at CONNECT
+//! by the reused provider already; the startup topic cross-check is P3-4b.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -24,6 +24,7 @@ use anyhow::Context;
 use ggcommons::messaging::config::{BrokerConfig, LwtConfig, Messaging, MessagingConfig};
 use serde::Deserialize;
 
+use crate::policy::DEFAULT_EVT_BUFFER_MAX;
 use crate::relay::DEFAULT_MAX_HOPS;
 use crate::reply::{DEFAULT_MAX_PENDING, DEFAULT_REPLY_TTL_SECS};
 
@@ -74,10 +75,10 @@ pub struct InstanceEntry {
     /// applied verbatim by the reused `MqttProvider` at CONNECT on the site link.
     #[serde(default)]
     pub lwt: Option<LwtConfig>,
-    /// Per-class uplink policy (§2.5). P3-2 honors only `classes.app.enabled`
-    /// (the `app` opt-in); enables/rate-caps/buffers are enforced in P3-4.
+    /// Per-class uplink policy (§2.5): enables, rate caps, and the D-B10 `evt`
+    /// replay buffer — enforced by [`crate::policy::UplinkPolicy`] since P3-4.
     #[serde(default)]
-    pub uplink: UplinkPolicy,
+    pub uplink: UplinkConfig,
     /// Hop-tag cap (§2.3), default [`DEFAULT_MAX_HOPS`].
     #[serde(default)]
     pub max_hops: Option<usize>,
@@ -114,34 +115,76 @@ impl InstanceEntry {
     }
 }
 
-/// The §2.5 per-class uplink policy block. Fully parsed; P3-2 consumes only the
-/// `app` opt-in.
+/// The §2.5 per-class uplink policy block, fully typed (P3-4). Enforced at
+/// runtime by [`crate::policy::UplinkPolicy::from_config`].
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct UplinkPolicy {
+pub struct UplinkConfig {
     /// Per-class policy keyed by class token (`state`, …, `app`).
     #[serde(default)]
     pub classes: BTreeMap<String, ClassPolicy>,
 }
 
-impl UplinkPolicy {
+impl UplinkConfig {
     /// Whether the optional seventh uplink class `app` is relayed (default off).
+    /// Consulted at [`crate::relay::RelayEngine`] construction — `app` off means
+    /// the seventh filter is never even subscribed.
     pub fn app_enabled(&self) -> bool {
         self.classes.get("app").and_then(|c| c.enabled).unwrap_or(false)
     }
 }
 
-/// One class's uplink policy. Only `enabled` is modeled; the P3-4 knobs
-/// (`maxRatePerSec`, `burst`, `bufferWhileDisconnected`, `onDisconnect`) are
-/// carried opaquely in `rest` until that slice lands.
+/// One class's uplink policy knobs (§2.5). Every knob is optional; the §2.5
+/// defaults (every class enabled except `app`; unlimited rate; the D-B10 `evt`
+/// buffer on) are applied by [`crate::policy::UplinkPolicy::from_config`], not
+/// here. Unknown members are tolerated (forward compatibility — e.g. a future
+/// `onDisconnect`).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ClassPolicy {
-    /// Whether the class is relayed (P3-2 honors this for `app` only).
+    /// Whether the class is relayed (default: `true` for the six consumer
+    /// classes, `false` for `app`). A disabled class's messages drop + count.
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// The not-yet-enforced P3-4 knobs, preserved as raw JSON.
-    #[serde(flatten)]
-    #[allow(dead_code)] // carried for P3-4 (rate caps / evt buffer / onDisconnect)
-    pub rest: BTreeMap<String, serde_json::Value>,
+    /// Token-bucket refill rate in messages/second. Absent = unlimited. `0`
+    /// forwards only the initial `burst` then drops forever (prefer
+    /// `enabled: false` to switch a class off).
+    #[serde(default)]
+    pub max_rate_per_sec: Option<u32>,
+    /// Token-bucket capacity. Default: `2 × maxRatePerSec` (§2.5).
+    #[serde(default)]
+    pub burst: Option<u32>,
+    /// The D-B10 disconnect replay buffer. Honored for **`evt` only** (the
+    /// evt-only scope call); ignored — with a warning — on any other class.
+    #[serde(default)]
+    pub buffer_while_disconnected: Option<DisconnectBufferConfig>,
+}
+
+/// The `evt` replay-buffer knobs (D-B10: default **on**, **1000**, drop-oldest,
+/// memory-only — a WAN blip must not lose an alarm raise/clear).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisconnectBufferConfig {
+    /// Whether `evt` buffers (rather than drops) while the site link is down.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Buffer bound; overflow drops the OLDEST buffered message. `0` disables
+    /// buffering entirely.
+    #[serde(default = "default_evt_buffer_max")]
+    pub max_messages: usize,
+}
+
+impl Default for DisconnectBufferConfig {
+    fn default() -> Self {
+        DisconnectBufferConfig { enabled: true, max_messages: DEFAULT_EVT_BUFFER_MAX }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_evt_buffer_max() -> usize {
+    DEFAULT_EVT_BUFFER_MAX
 }
 
 /// The `reply` knobs (§2.4 / D-B9): the TTL'd correlation map behind the
@@ -301,10 +344,50 @@ mod tests {
         assert_eq!(site.reply.ttl_secs, 60);
         assert_eq!(site.reply.ttl(), Duration::from_secs(60));
         assert_eq!(site.reply.max_pending, 1024);
-        // P3-4 knobs survive parsing opaquely.
+        // The P3-4 knobs parse typed.
         let data = &site.uplink.classes["data"];
         assert_eq!(data.enabled, Some(true));
-        assert_eq!(data.rest["maxRatePerSec"], 200);
+        assert_eq!(data.max_rate_per_sec, Some(200));
+        assert_eq!(data.burst, Some(400));
+        assert!(data.buffer_while_disconnected.is_none());
+    }
+
+    #[test]
+    fn the_shipped_sample_config_parses_with_typed_uplink_knobs() {
+        // Backward compatibility with the committed sample (§2.7 shape).
+        let cfg: BridgeConfig =
+            serde_json::from_str(include_str!("../test-configs/config.json")).unwrap();
+        let uplink = &cfg.site_instance().unwrap().uplink;
+        assert_eq!(uplink.classes["log"].enabled, Some(false));
+        assert_eq!(uplink.classes["metric"].max_rate_per_sec, Some(50));
+        assert_eq!(uplink.classes["metric"].burst, None, "burst defaults to 2x rate downstream");
+        assert_eq!(uplink.classes["data"].max_rate_per_sec, Some(200));
+        assert_eq!(uplink.classes["data"].burst, Some(400));
+        let buf = uplink.classes["evt"].buffer_while_disconnected.as_ref().unwrap();
+        assert!(buf.enabled, "enabled defaults true when only maxMessages is given");
+        assert_eq!(buf.max_messages, 1000);
+        assert!(!uplink.app_enabled());
+    }
+
+    #[test]
+    fn buffer_knobs_default_and_unknown_class_members_are_tolerated() {
+        // `bufferWhileDisconnected: {}` -> the D-B10 defaults (on, 1000);
+        // unknown members (e.g. a future `onDisconnect`) must not break parsing.
+        let uplink: UplinkConfig = serde_json::from_str(
+            r#"{ "classes": {
+                "evt":  { "bufferWhileDisconnected": {} },
+                "data": { "enabled": true, "onDisconnect": "drop" }
+            } }"#,
+        )
+        .unwrap();
+        let buf = uplink.classes["evt"].buffer_while_disconnected.as_ref().unwrap();
+        assert!(buf.enabled);
+        assert_eq!(buf.max_messages, DEFAULT_EVT_BUFFER_MAX);
+        assert_eq!(uplink.classes["data"].enabled, Some(true));
+        // And the plain Default carries the same knobs.
+        let d = DisconnectBufferConfig::default();
+        assert!(d.enabled);
+        assert_eq!(d.max_messages, DEFAULT_EVT_BUFFER_MAX);
     }
 
     #[test]

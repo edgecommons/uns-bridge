@@ -19,21 +19,60 @@
 //! bridge-minted reply topic subscribed on the device bus (before the cmd is
 //! relayed), a one-shot per-reply pump, and a correlation entry in the TTL'd map
 //! swept by a periodic task (`min(ttl/4, 5 s)`).
+//!
+//! Every uplink-forwardable message additionally passes the §2.5 **uplink
+//! policy** ([`crate::policy`], pure) via the [`UplinkGovernor`]: per-class
+//! enables, per-class token-bucket rate caps, and the D-B10 disconnect behavior
+//! (non-`evt` drops + counts while the site link is down or a publish fails;
+//! `evt` rides a bounded drop-oldest replay buffer). A **connectivity watcher**
+//! task polls `site.connected()` and drains the buffer, strictly in order,
+//! whenever the link is up and something is queued.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ggcommons::messaging::{Destination, MessagingProvider, Qos, Subscription};
 use tokio::task::JoinHandle;
 
-use crate::config::{QueueConfig, ReplyConfig};
+use crate::config::{QueueConfig, ReplyConfig, UplinkConfig};
+use crate::policy::{class_index, EvtPush, UplinkPolicy, UplinkVerdict, POLICY_CLASSES};
 use crate::relay::{Direction, DropReason, RelayDecision, RelayEngine};
 use crate::reply::{prepare_reply, DownlinkRewrite, ReplyCorrelator, ReplyRelay};
 use ggcommons::uns::UnsClass;
 
+/// Cadence of the connectivity watcher that replays buffered `evt` once the
+/// site link is (back) up (§2.5 / D-B10 reconnect replay).
+const CONNECTIVITY_POLL: Duration = Duration::from_millis(250);
+
+/// Per-class counters over the seven policy-governed uplink classes (the §2.5
+/// metric table's per-class measures). `cmd` is not policy-governed and has no
+/// slot — counting it is a no-op / reads 0.
+#[derive(Debug, Default)]
+pub struct ClassCounters([AtomicU64; POLICY_CLASSES.len()]);
+
+impl ClassCounters {
+    /// Increment `class`'s counter.
+    pub fn incr(&self, class: UnsClass) {
+        if let Some(i) = class_index(class) {
+            self.0[i].fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// `class`'s current count.
+    #[allow(dead_code)] // the per-class observability seam (P3-4b); exercised by the tests
+    pub fn get(&self, class: UnsClass) -> u64 {
+        class_index(class).map_or(0, |i| self.0[i].load(Ordering::Relaxed))
+    }
+
+    /// The sum across every class.
+    pub fn total(&self) -> u64 {
+        self.0.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+    }
+}
+
 /// Relay counters (observable seams for tests now; surfaced as `metric`s through
-/// the normal metric subsystem in P3-4 — §2.5 table).
+/// the normal metric subsystem in P3-4b — §2.5 table).
 #[derive(Debug, Default)]
 pub struct RelayCounters {
     /// Messages relayed device → site.
@@ -57,6 +96,22 @@ pub struct RelayCounters {
     /// Replies arriving on a bridge reply topic with no live correlation entry
     /// (expired/evicted between delivery and resolution) — dropped.
     pub reply_stray: AtomicU64,
+    /// Uplink drops, per class: the class is disabled
+    /// (`uplink.classes.<class>.enabled == false`, §2.5).
+    pub dropped_disabled: ClassCounters,
+    /// Uplink drops, per class: over the class's token bucket
+    /// (`relay_dropped_rate`, §2.5).
+    pub dropped_rate: ClassCounters,
+    /// Uplink drops, per class: the site link was down (or the site publish
+    /// failed) and the class does not buffer (`relay_dropped_disconnected`,
+    /// §2.5 / D-B10).
+    pub dropped_disconnected: ClassCounters,
+    /// `evt` pushed into the D-B10 disconnect replay buffer.
+    pub evt_buffered: AtomicU64,
+    /// `evt` evicted from the FULL replay buffer (drop-oldest).
+    pub evt_buffer_dropped: AtomicU64,
+    /// Buffered `evt` replayed to the site broker, in order, after reconnect.
+    pub evt_replayed: AtomicU64,
 }
 
 impl RelayCounters {
@@ -203,6 +258,125 @@ impl ReplyProxy {
     }
 }
 
+/// The §2.5 uplink-policy plumbing shared by the uplink pumps and the
+/// connectivity watcher: the pure [`UplinkPolicy`] behind a lock, plus the site
+/// handle and counters its verdicts act on. Pure decisions live in
+/// [`crate::policy`]; this struct only pumps them.
+struct UplinkGovernor {
+    policy: Mutex<UplinkPolicy>,
+    /// The site broker — admitted uplinks (and evt replays) publish here; its
+    /// `connected()` is the §2.5 disconnect signal.
+    site: Arc<dyn MessagingProvider>,
+    counters: Arc<RelayCounters>,
+}
+
+impl UplinkGovernor {
+    /// Poison-recovering lock — a panicked task must not wedge the policy.
+    fn policy(&self) -> MutexGuard<'_, UplinkPolicy> {
+        self.policy.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Record the outcome of one push into the `evt` replay buffer.
+    fn record_push(&self, push: EvtPush, class: UnsClass) {
+        match push {
+            EvtPush::Stored { evicted_oldest } => {
+                self.counters.evt_buffered.fetch_add(1, Ordering::Relaxed);
+                if evicted_oldest {
+                    self.counters.evt_buffer_dropped.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!("evt replay buffer full: oldest dropped (drop-oldest)");
+                }
+            }
+            // Buffering disabled: the message drops like every other class
+            // (only reachable via the failed-publish path — a Buffer verdict is
+            // never issued with the buffer off).
+            EvtPush::Rejected => self.counters.dropped_disconnected.incr(class),
+        }
+    }
+
+    /// Run one decided-and-forwardable uplink message through the §2.5 policy,
+    /// then publish / buffer / drop + count per the verdict. A **failed site
+    /// publish is the disconnect path** (§2.5): `evt` buffers, everything else
+    /// counts `dropped_disconnected`.
+    async fn relay_up(&self, class: UnsClass, topic: String, bytes: Vec<u8>) {
+        // One lock scope for admit + (possible) buffer push, so the decision is
+        // atomic with respect to the watcher's replay drain. No await inside.
+        {
+            let mut policy = self.policy();
+            match policy.admit(class, self.site.connected(), Instant::now()) {
+                UplinkVerdict::Forward => {}
+                UplinkVerdict::Buffer => {
+                    tracing::debug!(topic, "evt buffered for replay (site link down or replay pending)");
+                    let push = policy.push_evt(topic, bytes);
+                    self.record_push(push, class);
+                    return;
+                }
+                UplinkVerdict::DropDisabled => {
+                    self.counters.dropped_disabled.incr(class);
+                    tracing::debug!(topic, class = class.token(), "uplink class disabled; dropped");
+                    return;
+                }
+                UplinkVerdict::DropDisconnected => {
+                    self.counters.dropped_disconnected.incr(class);
+                    tracing::debug!(topic, class = class.token(), "site link down; dropped (live path is not durable, D-B10)");
+                    return;
+                }
+                UplinkVerdict::DropRateCapped => {
+                    self.counters.dropped_rate.incr(class);
+                    tracing::debug!(topic, class = class.token(), "over the class rate cap; dropped");
+                    return;
+                }
+            }
+        }
+        // Forward: publish to the site broker. Keep an evt copy so a failed
+        // publish can still buffer it (the failed publish == disconnect rule).
+        let retained = (class == UnsClass::Evt).then(|| (topic.clone(), bytes.clone()));
+        match self.site.publish(&topic, bytes, Destination::Local, Qos::AtLeastOnce).await {
+            Ok(()) => {
+                self.counters.uplinked.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(topic, "relayed up");
+            }
+            Err(e) => {
+                tracing::warn!(topic, error = %e, "uplink publish failed; applying disconnect policy");
+                match retained {
+                    Some((topic, bytes)) => {
+                        let push = self.policy().push_evt(topic, bytes);
+                        self.record_push(push, class);
+                    }
+                    None => self.counters.dropped_disconnected.incr(class),
+                }
+            }
+        }
+    }
+
+    /// Drain the `evt` replay buffer to the site broker, **strictly in order**,
+    /// stopping at the first failed publish (the message is requeued at the
+    /// front; the next watcher tick retries) or when the link drops again
+    /// (D-B10 reconnect replay).
+    async fn replay_buffered_evt(&self) {
+        while self.site.connected() {
+            let Some((topic, bytes)) = self.policy().pop_evt() else {
+                return; // drained — the buffer clears as it empties
+            };
+            match self.site.publish(&topic, bytes.clone(), Destination::Local, Qos::AtLeastOnce).await
+            {
+                Ok(()) => {
+                    self.counters.evt_replayed.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(topic, "buffered evt replayed");
+                }
+                Err(e) => {
+                    tracing::warn!(topic, error = %e, "evt replay publish failed; will retry");
+                    if !self.policy().requeue_evt_front(topic, bytes) {
+                        // The buffer refilled to its bound while this message
+                        // was in flight: under drop-oldest it IS the victim.
+                        self.counters.evt_buffer_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// The running relay: pump tasks + the subscriptions they own, with counters.
 pub struct RelayIo {
     engine: Arc<RelayEngine>,
@@ -210,6 +384,7 @@ pub struct RelayIo {
     site: Arc<dyn MessagingProvider>,
     counters: Arc<RelayCounters>,
     reply_proxy: Arc<ReplyProxy>,
+    governor: Arc<UplinkGovernor>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -221,9 +396,11 @@ impl RelayIo {
     ///   to PRIMARY.
     ///
     /// Queue depths come from `queue` (`data` deep, others shallow — §2.2); the
-    /// reply-proxy knobs (`ttlSecs`/`maxPending`) come from `reply` (§2.4), and a
-    /// sweep task ticking every `min(ttl/4, 5 s)` expires stale correlation
-    /// entries.
+    /// reply-proxy knobs (`ttlSecs`/`maxPending`) come from `reply` (§2.4); the
+    /// per-class uplink policy (enables/rate caps/`evt` buffer — §2.5 / D-B10)
+    /// comes from `uplink`. Two periodic tasks run alongside the pumps: the
+    /// §2.4 TTL sweep (`min(ttl/4, 5 s)`) and the §2.5 connectivity watcher
+    /// ([`CONNECTIVITY_POLL`]) that replays buffered `evt`.
     ///
     /// # Errors
     /// A failed SUBSCRIBE on either connection surfaces immediately (the bridge
@@ -234,6 +411,7 @@ impl RelayIo {
         site: Arc<dyn MessagingProvider>,
         queue: &QueueConfig,
         reply: &ReplyConfig,
+        uplink: &UplinkConfig,
     ) -> ggcommons::Result<RelayIo> {
         let counters = Arc::new(RelayCounters::default());
         let reply_proxy = Arc::new(ReplyProxy {
@@ -244,9 +422,33 @@ impl RelayIo {
             counters: Arc::clone(&counters),
             reply_tasks: Mutex::new(Vec::new()),
         });
+        let policy = UplinkPolicy::from_config(uplink);
+        {
+            let disabled: Vec<&str> = POLICY_CLASSES
+                .iter()
+                .filter(|c| !policy.class_enabled(**c))
+                .map(|c| c.token())
+                .collect();
+            let rate_capped: Vec<&str> = POLICY_CLASSES
+                .iter()
+                .filter(|c| policy.has_rate_cap(**c))
+                .map(|c| c.token())
+                .collect();
+            tracing::info!(
+                disabled_classes = ?disabled,
+                rate_capped_classes = ?rate_capped,
+                evt_buffer = policy.evt_buffer_capacity(),
+                "uplink policy active (§2.5 / D-B10)"
+            );
+        }
+        let governor = Arc::new(UplinkGovernor {
+            policy: Mutex::new(policy),
+            site: Arc::clone(&site),
+            counters: Arc::clone(&counters),
+        });
         let mut tasks = Vec::new();
 
-        // UPLINK pumps: device bus → site broker.
+        // UPLINK pumps: device bus → site broker, each through the §2.5 policy.
         for (cls, filter) in engine.uplink_subscriptions() {
             let depth = if *cls == UnsClass::Data { queue.data } else { queue.default_depth };
             let sub = primary
@@ -256,10 +458,8 @@ impl RelayIo {
             tasks.push(tokio::spawn(pump(
                 sub,
                 Arc::clone(&engine),
-                Arc::clone(&site),
-                Direction::Uplink,
                 Arc::clone(&counters),
-                None, // replies only ride the downlink (§2.4)
+                PumpRole::Uplink { class: *cls, governor: Arc::clone(&governor) },
             )));
         }
 
@@ -273,11 +473,39 @@ impl RelayIo {
         tasks.push(tokio::spawn(pump(
             sub,
             Arc::clone(&engine),
-            Arc::clone(&primary),
-            Direction::Downlink,
             Arc::clone(&counters),
-            Some(Arc::clone(&reply_proxy)),
+            PumpRole::Downlink {
+                proxy: Arc::clone(&reply_proxy),
+                device_bus: Arc::clone(&primary),
+            },
         )));
+
+        // The §2.5 connectivity watcher: drain the evt replay buffer whenever
+        // the site link is up and something is queued (covers the reconnect
+        // rising edge AND the publish-failed-while-nominally-connected case).
+        //
+        // TODO(P3-4 follow-up slice — §2.5 / D-B10 / DESIGN-uns §9.3 layer 2):
+        // on the RISING EDGE of `site.connected()`, publish
+        // `ecv1/{device}/_bcast/main/cmd/republish-state` and
+        // `…/republish-cfg` on the DEVICE bus BEFORE replaying buffered evt,
+        // so the site view rehydrates `state`/`cfg` without retain. That
+        // rehydration broadcast (and the library's `_bcast` listener it rides
+        // on) is deliberately NOT part of this slice.
+        {
+            let governor = Arc::clone(&governor);
+            tasks.push(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(CONNECTIVITY_POLL);
+                loop {
+                    tick.tick().await;
+                    // Bind the count first: the policy guard must never be
+                    // held across the replay await.
+                    let pending = governor.policy().buffered_evt();
+                    if pending > 0 && governor.site.connected() {
+                        governor.replay_buffered_evt().await;
+                    }
+                }
+            }));
+        }
 
         // The §2.4 TTL sweep: expire stale correlation entries (unsubscribe +
         // count) every min(ttl/4, 5 s).
@@ -302,7 +530,7 @@ impl RelayIo {
             }));
         }
 
-        Ok(RelayIo { engine, primary, site, counters, reply_proxy, tasks })
+        Ok(RelayIo { engine, primary, site, counters, reply_proxy, governor, tasks })
     }
 
     /// The live relay counters.
@@ -313,6 +541,11 @@ impl RelayIo {
     /// The `relay_pending_replies` gauge (§2.5): in-flight correlation entries.
     pub fn pending_replies(&self) -> usize {
         self.reply_proxy.correlator().len()
+    }
+
+    /// The number of `evt` currently held in the D-B10 replay buffer.
+    pub fn buffered_evt(&self) -> usize {
+        self.governor.policy().buffered_evt()
     }
 
     /// Graceful stop: abort the pumps (incl. the sweep and the per-reply pumps),
@@ -352,49 +585,72 @@ impl RelayIo {
                 tracing::warn!(topic = %topic, error = %e, "pending reply-topic unsubscribe failed");
             }
         }
+        let buffered = self.governor.policy().buffered_evt();
+        if buffered > 0 {
+            // Memory-only by design (D-B10): the live path is not durable.
+            tracing::info!(buffered, "unreplayed buffered evt discarded at shutdown");
+        }
         tracing::info!("relay stopped; all filters unsubscribed");
     }
 }
 
-/// One subscription's pump: receive → [`RelayEngine::decide`] → republish
-/// topic-verbatim on the other connection. Serial per subscription (ordered).
-/// The downlink pump carries the reply proxy (`reply: Some(…)`) and runs every
-/// forwardable `cmd` through the §2.4 `reply_to` rewrite first.
+/// What a pump does with a [`RelayDecision::Forward`]: uplinks pass the §2.5
+/// policy governor; the downlink runs the §2.4 reply proxy, then publishes to
+/// the device bus.
+enum PumpRole {
+    /// Device bus → site broker, one pump per relayed class (the class rides
+    /// along so the policy and the per-class counters key correctly).
+    Uplink { class: UnsClass, governor: Arc<UplinkGovernor> },
+    /// Site broker → device bus (own-device `cmd` only).
+    Downlink { proxy: Arc<ReplyProxy>, device_bus: Arc<dyn MessagingProvider> },
+}
+
+impl PumpRole {
+    fn direction(&self) -> Direction {
+        match self {
+            PumpRole::Uplink { .. } => Direction::Uplink,
+            PumpRole::Downlink { .. } => Direction::Downlink,
+        }
+    }
+}
+
+/// One subscription's pump: receive → [`RelayEngine::decide`] → hand the
+/// forwardable bytes to the role's path (topic-verbatim republish either way).
+/// Serial per subscription (ordered).
 async fn pump(
     mut sub: Subscription,
     engine: Arc<RelayEngine>,
-    to: Arc<dyn MessagingProvider>,
-    direction: Direction,
     counters: Arc<RelayCounters>,
-    reply: Option<Arc<ReplyProxy>>,
+    role: PumpRole,
 ) {
+    let direction = role.direction();
     while let Some((topic, payload)) = sub.recv().await {
         match engine.decide(direction, &topic, &payload) {
-            RelayDecision::Forward(bytes) => {
-                let bytes = match &reply {
-                    Some(proxy) => match proxy.rewrite_downlink(&topic, bytes).await {
-                        Some(bytes) => bytes,
-                        None => continue, // reply subscription failed: fail closed
-                    },
-                    None => bytes,
-                };
-                // Topic-verbatim republish. Both providers' "Local" destination is
-                // the broker they were built against (device bus vs site broker).
-                match to.publish(&topic, bytes, Destination::Local, Qos::AtLeastOnce).await {
-                    Ok(()) => {
-                        let counter = match direction {
-                            Direction::Uplink => &counters.uplinked,
-                            Direction::Downlink => &counters.downlinked,
-                        };
-                        counter.fetch_add(1, Ordering::Relaxed);
-                        tracing::debug!(topic, ?direction, "relayed");
-                    }
-                    Err(e) => {
-                        counters.publish_failed.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!(topic, ?direction, error = %e, "relay publish failed");
+            RelayDecision::Forward(bytes) => match &role {
+                PumpRole::Uplink { class, governor } => {
+                    governor.relay_up(*class, topic, bytes).await;
+                }
+                PumpRole::Downlink { proxy, device_bus } => {
+                    let Some(bytes) = proxy.rewrite_downlink(&topic, bytes).await else {
+                        continue; // reply subscription failed: fail closed
+                    };
+                    // Topic-verbatim republish; the provider's "Local" destination
+                    // is the broker it was built against (here: the device bus).
+                    match device_bus
+                        .publish(&topic, bytes, Destination::Local, Qos::AtLeastOnce)
+                        .await
+                    {
+                        Ok(()) => {
+                            counters.downlinked.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!(topic, "relayed down");
+                        }
+                        Err(e) => {
+                            counters.publish_failed.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(topic, error = %e, "downlink publish failed");
+                        }
                     }
                 }
-            }
+            },
             RelayDecision::Drop(reason) => {
                 counters.count_drop(reason);
                 tracing::debug!(topic, ?direction, ?reason, "not relayed");
@@ -420,6 +676,8 @@ mod tests {
 
     /// In-memory fake `MessagingProvider` (the library's FakeProvider pattern):
     /// records publishes and routes them into matching registered subscriptions.
+    /// Carries a `connected()` toggle (the §2.5 disconnect signal) and a
+    /// forced-publish-failure toggle (the failed-publish == disconnect path).
     #[derive(Default)]
     struct FakeProvider {
         subs: Mutex<Vec<FakeSub>>,
@@ -427,6 +685,10 @@ mod tests {
         unsubscribed: Mutex<Vec<String>>,
         /// When set, SUBSCRIBEs to filters starting with this prefix fail.
         fail_subscribe_prefix: Mutex<Option<String>>,
+        /// Inverted so `Default` (false) means CONNECTED — matching the P3-3 fake.
+        disconnected: std::sync::atomic::AtomicBool,
+        /// When true, every publish fails (nothing recorded, nothing routed).
+        fail_publish: std::sync::atomic::AtomicBool,
     }
 
     impl FakeProvider {
@@ -440,6 +702,14 @@ mod tests {
         fn subscriptions(&self) -> Vec<String> {
             self.subs.lock().unwrap().iter().map(|(f, _)| f.clone()).collect()
         }
+        /// Toggle the `connected()` signal (the site-link up/down seam).
+        fn set_connected(&self, connected: bool) {
+            self.disconnected.store(!connected, Ordering::SeqCst);
+        }
+        /// Toggle forced publish failure.
+        fn set_fail_publish(&self, fail: bool) {
+            self.fail_publish.store(fail, Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -451,6 +721,11 @@ mod tests {
             _dest: Destination,
             _qos: Qos,
         ) -> ggcommons::Result<()> {
+            if self.fail_publish.load(Ordering::SeqCst) {
+                return Err(ggcommons::GgError::Messaging(format!(
+                    "forced publish failure for {topic}"
+                )));
+            }
             self.published.lock().unwrap().push((topic.to_string(), payload.clone()));
             let subs = self.subs.lock().unwrap().clone();
             for (filter, tx) in subs {
@@ -487,7 +762,7 @@ mod tests {
         }
 
         fn connected(&self) -> bool {
-            true
+            !self.disconnected.load(Ordering::SeqCst)
         }
     }
 
@@ -500,11 +775,24 @@ mod tests {
     }
 
     async fn started() -> (RelayIo, Arc<FakeProvider>, Arc<FakeProvider>) {
-        started_with(ReplyConfig::default()).await
+        started_opts(ReplyConfig::default(), UplinkConfig::default()).await
     }
 
     async fn started_with(reply: ReplyConfig) -> (RelayIo, Arc<FakeProvider>, Arc<FakeProvider>) {
-        let engine = Arc::new(RelayEngine::new("gw-01", DEFAULT_MAX_HOPS, false).unwrap());
+        started_opts(reply, UplinkConfig::default()).await
+    }
+
+    /// Start with an `uplink` policy block given as its config JSON.
+    async fn started_uplink(uplink: Value) -> (RelayIo, Arc<FakeProvider>, Arc<FakeProvider>) {
+        started_opts(ReplyConfig::default(), serde_json::from_value(uplink).unwrap()).await
+    }
+
+    async fn started_opts(
+        reply: ReplyConfig,
+        uplink: UplinkConfig,
+    ) -> (RelayIo, Arc<FakeProvider>, Arc<FakeProvider>) {
+        let engine =
+            Arc::new(RelayEngine::new("gw-01", DEFAULT_MAX_HOPS, uplink.app_enabled()).unwrap());
         let device = Arc::new(FakeProvider::default());
         let site = Arc::new(FakeProvider::default());
         let io = RelayIo::start(
@@ -513,6 +801,7 @@ mod tests {
             Arc::clone(&site) as Arc<dyn MessagingProvider>,
             &QueueConfig::default(),
             &reply,
+            &uplink,
         )
         .await
         .unwrap();
@@ -898,5 +1187,269 @@ mod tests {
             device.unsubscribed().contains(&bridge_topic),
             "an in-flight bridge reply topic must be unsubscribed at shutdown"
         );
+    }
+
+    // ---- the §2.5 uplink policy + D-B10 disconnect behavior (P3-4) ----
+
+    const EVT_TOPIC: &str = "ecv1/gw-01/opcua-adapter/main/evt/alarm";
+
+    fn evt_envelope(n: u64) -> Vec<u8> {
+        MessageBuilder::new("alarm", "1.0")
+            .payload(json!({ "n": n }))
+            .build()
+            .to_vec()
+            .unwrap()
+    }
+
+    /// The `body.n` markers of every evt the site broker received, in order.
+    fn evt_ns_at_site(site: &FakeProvider) -> Vec<u64> {
+        site.published()
+            .iter()
+            .filter(|(t, _)| t == EVT_TOPIC)
+            .map(|(_, b)| {
+                let v: Value = serde_json::from_slice(b).unwrap();
+                v["body"]["n"].as_u64().unwrap()
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn disabled_class_drops_and_counts_while_others_flow() {
+        let (io, device, site) =
+            started_uplink(json!({ "classes": { "log": { "enabled": false } } })).await;
+        device
+            .publish("ecv1/gw-01/c/main/log/tail", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| io.counters().dropped_disabled.get(UnsClass::Log) == 1).await,
+            "the disabled-class drop must be counted"
+        );
+        assert!(site.published().is_empty(), "a disabled class must not reach the site broker");
+
+        // The other classes are unaffected.
+        device
+            .publish("ecv1/gw-01/c/main/state", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(wait_until(|| !site.published().is_empty()).await, "state must still relay");
+        assert_eq!(io.counters().uplinked.load(Ordering::Relaxed), 1);
+        assert_eq!(io.counters().dropped_disabled.total(), 1);
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn app_opt_in_relays_through_engine_and_policy() {
+        // Default: app is not even subscribed (engine-level; pinned by the relay
+        // tests). Opted in: the seventh filter exists AND the policy forwards.
+        let (io, device, site) =
+            started_uplink(json!({ "classes": { "app": { "enabled": true } } })).await;
+        let topic = "ecv1/gw-01/my-app/main/app/chatter";
+        device.publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce).await.unwrap();
+        assert!(wait_until(|| !site.published().is_empty()).await, "opted-in app must relay");
+        assert_eq!(site.published()[0].0, topic);
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn rate_capped_class_drops_excess_deterministically_and_counts() {
+        // rate 0 / burst 1: exactly one token, never refilled — deterministic
+        // regardless of wall-clock timing (the fine-grained refill math is
+        // pinned by the pure policy tests with an injected clock).
+        let (io, device, site) = started_uplink(json!({
+            "classes": { "data": { "maxRatePerSec": 0, "burst": 1 } }
+        }))
+        .await;
+        let topic = "ecv1/gw-01/modbus-adapter/main/data/temp";
+        for _ in 0..3 {
+            device
+                .publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce)
+                .await
+                .unwrap();
+        }
+        assert!(
+            wait_until(|| io.counters().dropped_rate.get(UnsClass::Data) == 2).await,
+            "the over-cap drops must be counted"
+        );
+        assert_eq!(site.published().len(), 1, "only the burst token's message passes");
+        assert_eq!(io.counters().uplinked.load(Ordering::Relaxed), 1);
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_drops_non_evt_per_class_and_buffers_evt() {
+        let (io, device, site) = started().await;
+        site.set_connected(false);
+
+        device
+            .publish("ecv1/gw-01/c/main/state", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        device
+            .publish("ecv1/gw-01/c/main/data/temp", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        device
+            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+
+        assert!(
+            wait_until(|| io.counters().dropped_disconnected.total() == 2
+                && io.counters().evt_buffered.load(Ordering::Relaxed) == 1)
+            .await,
+            "disconnect drops + the evt buffering must be counted"
+        );
+        assert_eq!(io.counters().dropped_disconnected.get(UnsClass::State), 1);
+        assert_eq!(io.counters().dropped_disconnected.get(UnsClass::Data), 1);
+        assert_eq!(io.counters().dropped_disconnected.get(UnsClass::Evt), 0, "evt buffers instead");
+        assert_eq!(io.buffered_evt(), 1);
+        assert!(site.published().is_empty(), "nothing reaches a down site link");
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_replays_buffered_evt_in_order_then_clears() {
+        let (io, device, site) = started().await;
+        site.set_connected(false);
+        for n in 1..=3 {
+            device
+                .publish(EVT_TOPIC, evt_envelope(n), Destination::Local, Qos::AtLeastOnce)
+                .await
+                .unwrap();
+        }
+        assert!(
+            wait_until(|| io.buffered_evt() == 3).await,
+            "the three evt must buffer while disconnected"
+        );
+
+        site.set_connected(true);
+        assert!(
+            wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 3).await,
+            "the buffered evt must replay on reconnect"
+        );
+        assert_eq!(evt_ns_at_site(&site), vec![1, 2, 3], "replay is strictly in order");
+        assert_eq!(io.buffered_evt(), 0, "the buffer clears after replay");
+        // The replayed bytes are the hop-stamped forward bytes (topic-verbatim
+        // + the §2.3 hop tag — stamped before buffering).
+        let (topic, bytes) = site.published().remove(0);
+        assert_eq!(topic, EVT_TOPIC);
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn evt_buffer_respects_max_dropping_oldest() {
+        let (io, device, site) = started_uplink(json!({
+            "classes": { "evt": { "bufferWhileDisconnected": { "maxMessages": 2 } } }
+        }))
+        .await;
+        site.set_connected(false);
+        for n in 1..=3 {
+            device
+                .publish(EVT_TOPIC, evt_envelope(n), Destination::Local, Qos::AtLeastOnce)
+                .await
+                .unwrap();
+        }
+        assert!(
+            wait_until(|| io.counters().evt_buffer_dropped.load(Ordering::Relaxed) == 1).await,
+            "the overflow eviction must be counted"
+        );
+        assert_eq!(io.buffered_evt(), 2, "the bound holds");
+
+        site.set_connected(true);
+        assert!(
+            wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 2).await,
+            "the surviving evt must replay"
+        );
+        assert_eq!(evt_ns_at_site(&site), vec![2, 3], "the OLDEST was the drop victim");
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn evt_buffer_disabled_drops_on_disconnect_like_any_class() {
+        let (io, device, site) = started_uplink(json!({
+            "classes": { "evt": { "bufferWhileDisconnected": { "enabled": false } } }
+        }))
+        .await;
+        site.set_connected(false);
+        device
+            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| io.counters().dropped_disconnected.get(UnsClass::Evt) == 1).await,
+            "with the buffer off, evt drops + counts like every class"
+        );
+        assert_eq!(io.buffered_evt(), 0);
+        assert_eq!(io.counters().evt_buffered.load(Ordering::Relaxed), 0);
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_site_publish_is_the_disconnect_path() {
+        // connected() still true, but publishes fail: evt buffers, non-evt
+        // counts dropped_disconnected (§2.5 "or a publish fails").
+        let (io, device, site) = started().await;
+        site.set_fail_publish(true);
+
+        device
+            .publish("ecv1/gw-01/c/main/state", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        device
+            .publish(EVT_TOPIC, evt_envelope(7), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| io.counters().dropped_disconnected.get(UnsClass::State) == 1
+                && io.counters().evt_buffered.load(Ordering::Relaxed) == 1)
+            .await,
+            "a failed publish must drop-count non-evt and buffer evt"
+        );
+
+        // Once publishes work again the watcher drains the buffer (connected()
+        // never flipped — the buffered>0 check covers this case too).
+        site.set_fail_publish(false);
+        assert!(
+            wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 1).await,
+            "the buffered evt must replay once publishes succeed"
+        );
+        assert_eq!(evt_ns_at_site(&site), vec![7]);
+        assert_eq!(io.buffered_evt(), 0);
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn replay_failure_requeues_front_and_retries_in_order() {
+        let (io, device, site) = started().await;
+        site.set_connected(false);
+        for n in 1..=2 {
+            device
+                .publish(EVT_TOPIC, evt_envelope(n), Destination::Local, Qos::AtLeastOnce)
+                .await
+                .unwrap();
+        }
+        assert!(wait_until(|| io.buffered_evt() == 2).await);
+
+        // Link "up" but publishes still failing: each watcher tick pops the
+        // oldest, fails, and requeues it at the front — nothing replays,
+        // nothing is lost, order is preserved.
+        site.set_fail_publish(true);
+        site.set_connected(true);
+        tokio::time::sleep(Duration::from_millis(600)).await; // a few watcher ticks
+        assert_eq!(io.counters().evt_replayed.load(Ordering::Relaxed), 0);
+        assert!(site.published().is_empty());
+
+        site.set_fail_publish(false);
+        assert!(
+            wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 2).await,
+            "the retried replay must drain the buffer"
+        );
+        assert_eq!(evt_ns_at_site(&site), vec![1, 2], "requeue-front preserves order");
+        assert_eq!(io.buffered_evt(), 0);
+        assert_eq!(io.counters().evt_buffer_dropped.load(Ordering::Relaxed), 0);
+        io.shutdown().await;
     }
 }

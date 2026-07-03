@@ -25,8 +25,9 @@
 //! The IO wiring that pumps subscriptions through this engine lives in
 //! [`crate::io`]; the reply-`reply_to` rewrite (P3-3, [`crate::reply`]) slots in
 //! around this engine, reusing [`RelayEngine::stamp_hop`] for the reply back-haul
-//! ("a relay like any other", §2.4); per-class uplink policy / rate caps (P3-4)
-//! slot in the same way.
+//! ("a relay like any other", §2.4); the per-class uplink policy / rate caps /
+//! evt replay buffer (P3-4, [`crate::policy`]) slot in the same way, downstream
+//! of every Forward decision on the uplink.
 
 use ggcommons::messaging::message::{HierEntry, Message, MessageIdentity, MessageTags};
 use ggcommons::uns::{Uns, UnsClass, UnsScope};
