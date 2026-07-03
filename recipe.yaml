@@ -1,0 +1,67 @@
+---
+# PACKAGING STUB (P3-2). The GREENGRASS deployment of the bridge runs the binary against the
+# Nucleus; note the PRIMARY = IPC variant of the relay is a documented follow-up — this recipe
+# currently assumes a device-local MQTT broker as the primary (HOST-style config via GG_CONFIG).
+# Finalized alongside deploy/site-broker/ in P3-5 and org integration in P3-6.
+RecipeFormatVersion: "2020-01-25"
+ComponentName: "com.mbreissi.uns-bridge"
+ComponentVersion: "1.0.0"
+ComponentDescription: "UNS bridge: one per device bus — an envelope-aware relay between the device-local bus and the site UNS broker (uplinks the six UNS classes topic-verbatim, downlinks own-device commands, hop-tag loop protection, site-connection LWT)."
+ComponentPublisher: "Marc Breissinger"
+ComponentConfiguration:
+  DefaultConfiguration:
+    ComponentConfig:
+      logging:
+        level: "INFO"
+      heartbeat:
+        enabled: true
+        intervalSecs: 5
+      metricEmission:
+        target: "messaging"
+      component:
+        name: "com.mbreissi.uns-bridge"
+        instances:
+          - id: "site"
+            siteBroker:
+              host: "site-broker.example"
+              port: 8883
+              clientId: "uns-bridge-{ThingName}"
+              credentials:
+                certPath: "/greengrass/v2/work/{ComponentFullName}/certs/client.pem"
+                keyPath: "/greengrass/v2/work/{ComponentFullName}/certs/client.key"
+                caPath: "/greengrass/v2/work/{ComponentFullName}/certs/ca.pem"
+            lwt:
+              topic: "ecv1/{ThingName}/uns-bridge/main/state"
+              payload:
+                status: "UNREACHABLE"
+              qos: 1
+            uplink:
+              classes:
+                app:
+                  enabled: false
+            reply:
+              ttlSecs: 60
+              maxPending: 1024
+            maxHops: 4
+            queue:
+              data: 512
+              default: 64
+    accessControl:
+      aws.greengrass.ipc.pubsub:
+        "com.mbreissi.uns-bridge:pubsub:1":
+          policyDescription: Allows the bridge to relay all local UNS topics.
+          operations:
+            - "aws.greengrass#PublishToTopic"
+            - "aws.greengrass#SubscribeToTopic"
+          resources:
+            - "*"
+Manifests:
+  - Platform:
+      os: linux
+    Artifacts:
+      - URI: "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/uns-bridge"
+    Lifecycle:
+      Install:
+        Script: "chmod +x {artifacts:path}/uns-bridge"
+      Run:
+        Script: "{artifacts:path}/uns-bridge --config /greengrass/v2/work/{ComponentFullName}/config.json --thing {iot:thingName}"

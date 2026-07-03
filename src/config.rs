@@ -1,0 +1,365 @@
+//! # config — the bridge's own component config (§2.7 shape)
+//!
+//! **One-liner purpose**: Parse the bridge's config file: the standard `messaging`
+//! section (the PRIMARY, device-bus connection) plus the `component.instances[]`
+//! entry declaring the SITE broker — the bridge's **external system**, exactly how
+//! an adapter declares its OPC UA endpoints.
+//!
+//! The site entry reuses the library's existing `MessagingConfig`/`mqttBroker`
+//! shape verbatim ([`BrokerConfig`], [`LwtConfig`]) so the site connection is built
+//! by the **core's own** `MqttProvider::connect` — no new schema, no core change
+//! (DESIGN-uns-bridge §1.1/§1.2).
+//!
+//! Sections the later slices own are parsed and carried but not yet enforced:
+//! `uplink` per-class enable/rate-caps/buffers (P3-4 — only `classes.app.enabled`
+//! is honored today), `reply` (P3-3), `lwt` (applied at CONNECT by the reused
+//! provider already; the startup topic cross-check is P3-4).
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use anyhow::Context;
+use ggcommons::messaging::config::{BrokerConfig, LwtConfig, Messaging, MessagingConfig};
+use serde::Deserialize;
+
+use crate::relay::DEFAULT_MAX_HOPS;
+
+/// The default site-instance id (the documented convention, §2.1).
+pub const SITE_INSTANCE_ID: &str = "site";
+
+/// Default bounded client-side queue for the `data` class subscription (§2.2).
+pub const DEFAULT_DATA_QUEUE: usize = 512;
+/// Default bounded client-side queue for every other class subscription (§2.2).
+pub const DEFAULT_QUEUE: usize = 64;
+
+/// The bridge's top-level config file (unknown sections — `hierarchy`, `identity`,
+/// `heartbeat`, … — are tolerated; the full facade integration is a follow-up).
+#[derive(Debug, Clone, Deserialize)]
+pub struct BridgeConfig {
+    /// PRIMARY connection: the device-local bus. The standard ggcommons
+    /// `messaging` shape (doubles as the `--transport MQTT <file>` payload).
+    pub messaging: Messaging,
+    /// The component section carrying the site-broker instance entry.
+    pub component: ComponentSection,
+}
+
+/// The `component` config section.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComponentSection {
+    /// The component's full name (informational until the facade integration).
+    #[serde(default)]
+    #[allow(dead_code)] // read by tests today; the facade integration consumes it
+    pub name: Option<String>,
+    /// Per-instance entries; the bridge's site broker lives in the entry with
+    /// id [`SITE_INSTANCE_ID`].
+    #[serde(default)]
+    pub instances: Vec<InstanceEntry>,
+}
+
+/// One `component.instances[]` entry (§2.7). For the bridge, the `"site"` entry
+/// declares the site broker plus the relay knobs.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceEntry {
+    /// The instance id (`"site"` selects the site-broker entry).
+    pub id: String,
+    /// The site broker endpoint — the existing library `mqttBroker` shape
+    /// (host/port/clientId/credentials, TLS via cert paths).
+    #[serde(default)]
+    pub site_broker: Option<BrokerConfig>,
+    /// The site-connection LWT (§2.6) — the library's `messaging.lwt` shape,
+    /// applied verbatim by the reused `MqttProvider` at CONNECT on the site link.
+    #[serde(default)]
+    pub lwt: Option<LwtConfig>,
+    /// Per-class uplink policy (§2.5). P3-2 honors only `classes.app.enabled`
+    /// (the `app` opt-in); enables/rate-caps/buffers are enforced in P3-4.
+    #[serde(default)]
+    pub uplink: UplinkPolicy,
+    /// Hop-tag cap (§2.3), default [`DEFAULT_MAX_HOPS`].
+    #[serde(default)]
+    pub max_hops: Option<usize>,
+    /// Per-class subscription queue depths (§2.2).
+    #[serde(default)]
+    pub queue: QueueConfig,
+    /// Reply correlation-map knobs (`ttlSecs`/`maxPending`) — parsed opaquely,
+    /// consumed by the P3-3 reply-rewrite slice.
+    #[serde(default)]
+    #[allow(dead_code)] // carried for P3-3 (reply_to rewrite)
+    pub reply: Option<serde_json::Value>,
+}
+
+impl InstanceEntry {
+    /// The effective hop cap.
+    pub fn effective_max_hops(&self) -> usize {
+        self.max_hops.unwrap_or(DEFAULT_MAX_HOPS)
+    }
+
+    /// Build the site connection's [`MessagingConfig`] from this entry — the exact
+    /// input the reused core `MqttProvider::connect` takes (§1.1). The site broker
+    /// maps onto the config's `local` slot (the provider's primary connection);
+    /// there is deliberately no `iotCore` on the site link.
+    ///
+    /// # Errors
+    /// When the entry has no `siteBroker`.
+    pub fn site_messaging(&self) -> anyhow::Result<MessagingConfig> {
+        let broker = self
+            .site_broker
+            .clone()
+            .with_context(|| format!("component.instances[{}] has no siteBroker", self.id))?;
+        Ok(MessagingConfig {
+            messaging: Messaging { local: broker, iot_core: None, lwt: self.lwt.clone() },
+        })
+    }
+}
+
+/// The §2.5 per-class uplink policy block. Fully parsed; P3-2 consumes only the
+/// `app` opt-in.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UplinkPolicy {
+    /// Per-class policy keyed by class token (`state`, …, `app`).
+    #[serde(default)]
+    pub classes: BTreeMap<String, ClassPolicy>,
+}
+
+impl UplinkPolicy {
+    /// Whether the optional seventh uplink class `app` is relayed (default off).
+    pub fn app_enabled(&self) -> bool {
+        self.classes.get("app").and_then(|c| c.enabled).unwrap_or(false)
+    }
+}
+
+/// One class's uplink policy. Only `enabled` is modeled; the P3-4 knobs
+/// (`maxRatePerSec`, `burst`, `bufferWhileDisconnected`, `onDisconnect`) are
+/// carried opaquely in `rest` until that slice lands.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ClassPolicy {
+    /// Whether the class is relayed (P3-2 honors this for `app` only).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The not-yet-enforced P3-4 knobs, preserved as raw JSON.
+    #[serde(flatten)]
+    #[allow(dead_code)] // carried for P3-4 (rate caps / evt buffer / onDisconnect)
+    pub rest: BTreeMap<String, serde_json::Value>,
+}
+
+/// Per-class bounded subscription queue depths (`max_messages`, §2.2): `data`
+/// deep, everything else shallow.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QueueConfig {
+    /// Queue depth for the `data` class subscription.
+    #[serde(default = "default_data_queue")]
+    pub data: usize,
+    /// Queue depth for every other subscription.
+    #[serde(default = "default_queue", rename = "default")]
+    pub default_depth: usize,
+}
+
+fn default_data_queue() -> usize {
+    DEFAULT_DATA_QUEUE
+}
+
+fn default_queue() -> usize {
+    DEFAULT_QUEUE
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        QueueConfig { data: DEFAULT_DATA_QUEUE, default_depth: DEFAULT_QUEUE }
+    }
+}
+
+impl BridgeConfig {
+    /// Load and parse the bridge config from a JSON file.
+    pub async fn load(path: impl AsRef<Path>) -> anyhow::Result<BridgeConfig> {
+        let path = path.as_ref();
+        let bytes = tokio::fs::read(path)
+            .await
+            .with_context(|| format!("reading bridge config {}", path.display()))?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing bridge config {}", path.display()))
+    }
+
+    /// The PRIMARY (device-bus) connection's [`MessagingConfig`].
+    pub fn primary_messaging(&self) -> MessagingConfig {
+        MessagingConfig { messaging: self.messaging.clone() }
+    }
+
+    /// The site-broker instance entry: the entry with id [`SITE_INSTANCE_ID`], or —
+    /// when none carries that id — the single entry declaring a `siteBroker`.
+    ///
+    /// # Errors
+    /// When no entry qualifies, or several entries carry a `siteBroker` and none
+    /// is named `"site"` (ambiguous).
+    pub fn site_instance(&self) -> anyhow::Result<&InstanceEntry> {
+        if let Some(entry) =
+            self.component.instances.iter().find(|i| i.id == SITE_INSTANCE_ID)
+        {
+            return Ok(entry);
+        }
+        let mut with_broker =
+            self.component.instances.iter().filter(|i| i.site_broker.is_some());
+        match (with_broker.next(), with_broker.next()) {
+            (Some(entry), None) => Ok(entry),
+            (Some(_), Some(_)) => anyhow::bail!(
+                "several component.instances[] declare a siteBroker and none is named \
+                 '{SITE_INSTANCE_ID}' — name the site entry '{SITE_INSTANCE_ID}'"
+            ),
+            _ => anyhow::bail!(
+                "no site-broker entry found: add a component.instances[] entry with \
+                 id '{SITE_INSTANCE_ID}' and a siteBroker section"
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The §2.7 sample shape (concrete values — template substitution arrives with
+    /// the facade integration).
+    const FULL: &str = r#"{
+        "hierarchy": { "levels": ["site", "device"] },
+        "identity":  { "site": "dallas" },
+        "messaging": {
+            "local": { "host": "localhost", "port": 1883, "clientId": "uns-bridge-local" },
+            "requestTimeoutSeconds": 30
+        },
+        "component": {
+            "name": "com.mbreissi.uns-bridge",
+            "instances": [
+                { "id": "site",
+                  "siteBroker": { "host": "site-broker.dallas.example", "port": 8883,
+                                  "clientId": "uns-bridge-site",
+                                  "credentials": { "certPath": "c.pem", "keyPath": "k.pem", "caPath": "ca.pem" } },
+                  "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state",
+                           "payload": { "status": "UNREACHABLE" }, "qos": 1 },
+                  "uplink": { "classes": { "app": { "enabled": true },
+                                            "data": { "enabled": true, "maxRatePerSec": 200, "burst": 400 } } },
+                  "reply": { "ttlSecs": 60, "maxPending": 1024 },
+                  "maxHops": 6,
+                  "queue": { "data": 256, "default": 32 } }
+            ]
+        }
+    }"#;
+
+    #[test]
+    fn parses_the_full_section_2_7_shape() {
+        let cfg: BridgeConfig = serde_json::from_str(FULL).unwrap();
+        assert_eq!(cfg.component.name.as_deref(), Some("com.mbreissi.uns-bridge"));
+        let site = cfg.site_instance().unwrap();
+        assert_eq!(site.id, "site");
+        assert_eq!(site.effective_max_hops(), 6);
+        assert!(site.uplink.app_enabled());
+        assert_eq!(site.queue.data, 256);
+        assert_eq!(site.queue.default_depth, 32);
+        assert!(site.reply.is_some(), "reply knobs carried for P3-3");
+        // P3-4 knobs survive parsing opaquely.
+        let data = &site.uplink.classes["data"];
+        assert_eq!(data.enabled, Some(true));
+        assert_eq!(data.rest["maxRatePerSec"], 200);
+    }
+
+    #[test]
+    fn site_messaging_reuses_the_core_config_shape() {
+        let cfg: BridgeConfig = serde_json::from_str(FULL).unwrap();
+        let mc = cfg.site_instance().unwrap().site_messaging().unwrap();
+        assert_eq!(mc.messaging.local.resolved_host().unwrap(), "site-broker.dallas.example");
+        assert_eq!(mc.messaging.local.port, 8883);
+        assert!(mc.messaging.iot_core.is_none(), "no iotCore on the site link");
+        let lwt = mc.messaging.lwt.expect("lwt rides into the reused provider config");
+        assert_eq!(lwt.topic, "ecv1/gw-01/uns-bridge/main/state");
+        assert_eq!(lwt.payload_bytes(), br#"{"status":"UNREACHABLE"}"#);
+        assert_eq!(lwt.qos_or_default(), 1);
+    }
+
+    #[test]
+    fn primary_messaging_wraps_the_standard_section() {
+        let cfg: BridgeConfig = serde_json::from_str(FULL).unwrap();
+        let mc = cfg.primary_messaging();
+        assert_eq!(mc.messaging.local.resolved_host().unwrap(), "localhost");
+        assert_eq!(mc.messaging.local.port, 1883);
+    }
+
+    #[test]
+    fn defaults_apply_when_knobs_are_absent() {
+        let cfg: BridgeConfig = serde_json::from_str(
+            r#"{
+                "messaging": { "local": { "host": "h", "port": 1883, "clientId": "c" } },
+                "component": { "instances": [
+                    { "id": "site", "siteBroker": { "host": "s", "port": 1884, "clientId": "cs" } }
+                ] }
+            }"#,
+        )
+        .unwrap();
+        let site = cfg.site_instance().unwrap();
+        assert_eq!(site.effective_max_hops(), DEFAULT_MAX_HOPS);
+        assert!(!site.uplink.app_enabled(), "app is default OFF");
+        assert_eq!(site.queue.data, DEFAULT_DATA_QUEUE);
+        assert_eq!(site.queue.default_depth, DEFAULT_QUEUE);
+        assert!(site.site_messaging().unwrap().messaging.lwt.is_none());
+    }
+
+    #[test]
+    fn site_selection_falls_back_to_the_sole_broker_entry() {
+        let cfg: BridgeConfig = serde_json::from_str(
+            r#"{
+                "messaging": { "local": { "host": "h", "port": 1883, "clientId": "c" } },
+                "component": { "instances": [
+                    { "id": "uplink-1", "siteBroker": { "host": "s", "port": 1884, "clientId": "cs" } }
+                ] }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.site_instance().unwrap().id, "uplink-1");
+    }
+
+    #[test]
+    fn missing_or_ambiguous_site_entry_is_an_error() {
+        let none: BridgeConfig = serde_json::from_str(
+            r#"{
+                "messaging": { "local": { "host": "h", "port": 1883, "clientId": "c" } },
+                "component": { "instances": [] }
+            }"#,
+        )
+        .unwrap();
+        assert!(none.site_instance().is_err());
+
+        let ambiguous: BridgeConfig = serde_json::from_str(
+            r#"{
+                "messaging": { "local": { "host": "h", "port": 1883, "clientId": "c" } },
+                "component": { "instances": [
+                    { "id": "a", "siteBroker": { "host": "s1", "port": 1884, "clientId": "c1" } },
+                    { "id": "b", "siteBroker": { "host": "s2", "port": 1885, "clientId": "c2" } }
+                ] }
+            }"#,
+        )
+        .unwrap();
+        assert!(ambiguous.site_instance().is_err());
+
+        let entry_without_broker: BridgeConfig = serde_json::from_str(
+            r#"{
+                "messaging": { "local": { "host": "h", "port": 1883, "clientId": "c" } },
+                "component": { "instances": [ { "id": "site" } ] }
+            }"#,
+        )
+        .unwrap();
+        assert!(entry_without_broker.site_instance().unwrap().site_messaging().is_err());
+    }
+
+    #[tokio::test]
+    async fn load_reads_and_parses_a_file() {
+        let dir = std::env::temp_dir().join(format!("uns-bridge-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, FULL).unwrap();
+        let cfg = BridgeConfig::load(&path).await.unwrap();
+        assert_eq!(cfg.site_instance().unwrap().id, "site");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn load_missing_file_is_an_error() {
+        assert!(BridgeConfig::load("/no/such/uns-bridge-config.json").await.is_err());
+    }
+}
