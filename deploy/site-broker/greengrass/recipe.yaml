@@ -1,0 +1,45 @@
+---
+# PACKAGING STUB (P3-5, DESIGN-uns-bridge.md §4.2). Deploys the site broker as a Greengrass
+# component on the gateway core, via the stock `aws.greengrass.DockerApplicationManager` running
+# the SAME docker-compose.yml as the HOST recipe (../docker-compose.yml) — one broker definition,
+# two deployment paths. Finalized (real bucket/version wiring, actual `gdk`/CI packaging) in P3-6
+# alongside the bridge's own org integration; see ../README.md for the artifact/lifecycle notes.
+#
+# NOTE ON NAMING: this is a DIFFERENT Greengrass component from the bridge itself
+# (`com.mbreissi.uns-bridge`, ../../recipe.yaml) — the gateway core that hosts the site broker also
+# typically runs its OWN uns-bridge (its local Nucleus IPC bus is a device bus like any other,
+# §4.2), so a gateway deployment normally merges BOTH components.
+RecipeFormatVersion: "2020-01-25"
+ComponentName: "com.mbreissi.site-broker"
+ComponentVersion: "1.0.0"
+ComponentDescription: "uns-bridge site broker: EMQX running as a GG-managed Docker container on the gateway core — the aggregation point every device's uns-bridge uplinks to (DESIGN-uns-bridge.md §4.2/D-B13). Ships with the per-device ACL (acl.conf) mounted; see ../TLS.md for cert provisioning."
+ComponentPublisher: "Marc Breissinger"
+ComponentDependencies:
+  aws.greengrass.DockerApplicationManager:
+    VersionRequirement: "~2.0.0"
+    DependencyType: "HARD"
+ComponentConfiguration:
+  DefaultConfiguration:
+    accessControl:
+      aws.greengrass.ipc.pubsub: {}   # this component has no IPC surface of its own — it's a plain container
+Manifests:
+  - Platform:
+      os: linux
+    Artifacts:
+      # DockerApplicationManager pulls this straight from Docker Hub (public image, no registry
+      # credentials needed). Pin the tag deliberately — bump it as a reviewed change, never `latest`
+      # (DESIGN-uns-bridge.md §8 risk 9: "recipes pin the image tag").
+      - Uri: "docker:emqx/emqx:5.8.2"
+      # acl.conf + tls-certs/ + docker-compose.yml + .env, zipped and staged to S3 by the build
+      # step (P3-6). GDK unpacks archive artifacts under {artifacts:decompressedPath}/<zip-stem>/.
+      - Uri: "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/site-broker-config.zip"
+        Unarchive: ZIP
+    Lifecycle:
+      # Loose ordering by design: the bridge's own site connection retries in the background
+      # (DESIGN-uns-bridge.md §1.4), so it tolerates the broker starting after it — no explicit
+      # `DependsOn` from the bridge component to this one is required, though adding SOFT DependsOn
+      # is harmless if you want deployment status to reflect it.
+      Run:
+        Script: "docker compose -f {artifacts:decompressedPath}/site-broker-config/docker-compose.yml up"
+      Shutdown:
+        Script: "docker compose -f {artifacts:decompressedPath}/site-broker-config/docker-compose.yml down"

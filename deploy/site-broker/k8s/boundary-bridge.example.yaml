@@ -1,0 +1,99 @@
+# EXAMPLE ONLY — a boundary bridge (DESIGN-uns-bridge.md §4.3, D-B15): the ONE exception to "no
+# bridge runs inside a cluster" (see ../README.md and emqx.yaml). Use this when THIS cluster's
+# broker (emqx.yaml, `uns-bridge-site-broker`) is itself just one line of a BIGGER site — i.e. it
+# needs to uplink to a higher-tier / enterprise broker outside the cluster, exactly like a HOST or
+# GREENGRASS gateway's bridge does. If this cluster's broker IS the top of the tree (the common
+# case), do not deploy this — see emqx.yaml's header comment.
+#
+# PRIMARY (device bus, from the bridge's point of view) = THIS cluster's own broker
+# (uns-bridge-site-broker, emqx.yaml) — the bridge treats it exactly like a HOST device-local
+# broker. SITE = the external, higher-tier broker outside the cluster. Mirrors
+# ggcommons/templates/rust/k8s/deployment.yaml's shape (Downward-API identity, CONFIGMAP source,
+# whole-volume mount for hot-reload) with the D-B15 duplication guard:
+# `replicas: 1` + `strategy: Recreate` (two boundary bridges on the same broker pair
+# double-deliver every message — hop tags stop LOOPS, not duplication, DESIGN-uns-bridge.md §2.3).
+#
+# NOT YET DEPLOYABLE AS-IS: this repo does not ship a Dockerfile/container image for the bridge
+# itself (P3-5 scope is the site-broker recipes, not the bridge's own containerization) — `image:`
+# below is a placeholder. It also assumes the bridge's standard `-c/--platform/--transport` CLI
+# contract; today the bridge only has the minimal `--config <path> [--thing <name>]` CLI (see
+# ../../README.md "Also follow-ups"), which happens to work fine here (a mounted ConfigMap file
+# path is still just a file path) but does NOT get the CONFIGMAP source's hot-reload-on-..data-swap
+# behavior the way other ggcommons components do — a documented gap, not something this slice fixes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uns-bridge-boundary-config
+data:
+  config.json: |-
+    {
+      "messaging": {
+        "local": { "host": "uns-bridge-site-broker.uns-bridge.svc.cluster.local", "port": 1883, "clientId": "uns-bridge-boundary" }
+      },
+      "heartbeat": { "enabled": true, "intervalSecs": 5 },
+      "metricEmission": { "target": "messaging" },
+      "component": {
+        "instances": [
+          {
+            "id": "site",
+            "siteBroker": {
+              "host": "site-broker.enterprise.example", "port": 8883,
+              "clientId": "uns-bridge-k8s-boundary",
+              "credentials": {
+                "certPath": "/etc/uns-bridge/site-tls/client.crt",
+                "keyPath": "/etc/uns-bridge/site-tls/client.key",
+                "caPath": "/etc/uns-bridge/site-tls/ca.crt"
+              }
+            },
+            "lwt": { "topic": "ecv1/{ThingName}/uns-bridge/main/state", "payload": { "status": "UNREACHABLE" }, "qos": 1 },
+            "uplink": { "classes": { "app": { "enabled": false } } },
+            "reply": { "ttlSecs": 60, "maxPending": 1024 },
+            "maxHops": 4,
+            "queue": { "data": 512, "default": 64 }
+          }
+        ]
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uns-bridge-boundary
+  labels:
+    app.kubernetes.io/name: uns-bridge-boundary
+spec:
+  replicas: 1                 # D-B15: exactly one boundary bridge per broker pair, never scaled
+  strategy:
+    type: Recreate             # avoid a rolling-update window with two pods both relaying (D-B15)
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: uns-bridge-boundary
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: uns-bridge-boundary
+    spec:
+      automountServiceAccountToken: true   # projected SA token = the platform=KUBERNETES auto-detect signal
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: uns-bridge
+          image: REPLACE_ME   # ghcr.io/<owner>/uns-bridge:<tag> — no Dockerfile ships in this repo yet
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/ggcommons/config.json"]   # --thing omitted: falls through to GGCOMMONS_THING_NAME below (D-U1 identity chain)
+          env:
+            - name: GGCOMMONS_THING_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/ggcommons, readOnly: true }        # whole volume, never subPath (hot-reload)
+            - { name: site-tls, mountPath: /etc/uns-bridge/site-tls, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: uns-bridge-boundary-config }
+        - name: site-tls
+          secret: { secretName: uns-bridge-boundary-site-tls }   # NOT created here — provision per TLS.md "Prod"

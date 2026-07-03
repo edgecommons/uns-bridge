@@ -1,0 +1,133 @@
+# In-cluster EMQX broker (DESIGN-uns-bridge.md §4.3): the aggregation point itself, native to the
+# cluster — every in-cluster component already shares this ONE broker (no bridge runs inside a
+# cluster; see README.md and boundary-bridge.example.yaml for the one exception, a boundary pod).
+# Structurally the same Deployment+Service shape as ggcommons/test-infra/k8s/emqx.yaml (the
+# device-broker precedent for kind/k3s smokes): plaintext-only, anonymous, NO ACL.
+#
+# THIS IS DELIBERATELY DIFFERENT FROM docker-compose.yml/greengrass's "site" broker, and that
+# needs explaining: every in-cluster component here connects anonymously (no client cert), the same
+# way they already connect to the existing `ggcommons-emqx` k8s precedent — the cluster's own
+# NetworkPolicy/RBAC is the trust boundary for pure in-cluster traffic, not per-pod MQTT identity.
+# EMQX (open-source) evaluates ONE global authorization chain across every listener — it has no
+# per-listener ACL scoping — so mounting acl.conf here would apply `${username}`-keyed rules
+# against clients that never present a username, denying ALL of them (verified: this is exactly
+# what happens on the plaintext dev listener in docker-compose.yml, where it's intentional; here it
+# would silently break every ordinary in-cluster component's messaging). Do not "just mount the ACL
+# for consistency" — see the boundary block at the bottom for the case where it actually applies.
+#
+# Apply into the namespace this cluster's components use, e.g.:
+#   kubectl apply -n uns-bridge -f emqx.yaml
+#   kubectl -n uns-bridge rollout status deploy/uns-bridge-site-broker
+# Then point every in-cluster component's `messaging.local.host` at
+# `uns-bridge-site-broker.<namespace>.svc.cluster.local:1883`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uns-bridge-site-broker
+  labels:
+    app: uns-bridge-site-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: uns-bridge-site-broker
+  template:
+    metadata:
+      labels:
+        app: uns-bridge-site-broker
+    spec:
+      containers:
+        - name: emqx
+          image: emqx/emqx:5.8.2   # pinned deliberately (DESIGN-uns-bridge.md §8 risk 9) — bump as a reviewed change
+          ports:
+            - { name: mqtt, containerPort: 1883 }
+            - { name: dashboard, containerPort: 18083 }
+          env:
+            - { name: EMQX_ALLOW_ANONYMOUS, value: "true" }   # matches ggcommons/test-infra/k8s/emqx.yaml
+          readinessProbe:
+            tcpSocket: { port: 1883 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 1883 }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: uns-bridge-site-broker
+  labels:
+    app: uns-bridge-site-broker
+spec:
+  type: ClusterIP
+  selector:
+    app: uns-bridge-site-broker
+  ports:
+    - { name: mqtt, port: 1883, targetPort: 1883, protocol: TCP }
+
+# =====================================================================================================
+# BOUNDARY CASE — this cluster's broker ALSO aggregates external gateways bridging in (§4.3's
+# cross-cluster case) — e.g. a HOST/GREENGRASS uns-bridge elsewhere in the fleet uplinks to THIS
+# broker as its site broker. Do NOT retrofit the Deployment above for this: since EMQX OSS applies
+# one global ACL chain to every listener, turning on acl.conf there would (as explained above) also
+# start denying every anonymous in-cluster client. Run a SECOND, dedicated broker instead — same
+# acl.conf, same mTLS wiring as docker-compose.yml's "site" service, just running in this cluster.
+# In-cluster components keep talking to `uns-bridge-site-broker` above; only external gateways (and,
+# if you deploy one, this cluster's own boundary-bridge, boundary-bridge.example.yaml) talk to this
+# second instance. Uncomment and adapt (image/env block mirrors the Deployment above plus the mTLS
+# env vars from ../docker-compose.yml's `site` service and the acl ConfigMap mount):
+#
+# ---
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: uns-bridge-boundary-acl
+# data:
+#   acl.conf: |
+#     # paste ../acl.conf's contents here (or generate this ConfigMap FROM that file:
+#     # kubectl create configmap uns-bridge-boundary-acl --from-file=acl.conf=../acl.conf ...)
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: uns-bridge-boundary-broker
+# spec:
+#   replicas: 1
+#   selector: { matchLabels: { app: uns-bridge-boundary-broker } }
+#   template:
+#     metadata: { labels: { app: uns-bridge-boundary-broker } }
+#     spec:
+#       containers:
+#         - name: emqx
+#           image: emqx/emqx:5.8.2
+#           ports: [{ name: mqtts, containerPort: 8883 }]
+#           env:
+#             - { name: EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE, value: /opt/emqx/etc/certs/ca.crt }
+#             - { name: EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE, value: /opt/emqx/etc/certs/server.crt }
+#             - { name: EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE, value: /opt/emqx/etc/certs/server.key }
+#             - { name: EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__VERIFY, value: verify_peer }
+#             - { name: EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__FAIL_IF_NO_PEER_CERT, value: "true" }
+#             - { name: EMQX_LISTENERS__WS__DEFAULT__ENABLE, value: "false" }    # see ../docker-compose.yml's comment: the
+#             - { name: EMQX_LISTENERS__WSS__DEFAULT__ENABLE, value: "false" }   # default wss listener crashes boot without its own certs
+#             - { name: EMQX_MQTT__PEER_CERT_AS_USERNAME, value: cn }
+#             - { name: EMQX_AUTHORIZATION__NO_MATCH, value: deny }
+#           volumeMounts:
+#             - { name: acl, mountPath: /opt/emqx/etc/acl.conf, subPath: acl.conf, readOnly: true }
+#             - { name: tls, mountPath: /opt/emqx/etc/certs, readOnly: true }
+#       volumes:
+#         - { name: acl, configMap: { name: uns-bridge-boundary-acl } }
+#         - { name: tls, secret: { secretName: uns-bridge-boundary-broker-tls } }   # provision per ../TLS.md "Prod"
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: uns-bridge-boundary-broker
+# spec:
+#   type: LoadBalancer      # or NodePort, depending on the cluster's ingress story
+#   selector: { app: uns-bridge-boundary-broker }
+#   ports:
+#     - { name: mqtts, port: 8883, targetPort: 8883, protocol: TCP }

@@ -1,0 +1,99 @@
+# uns-bridge site-broker — HOST recipe (DESIGN-uns-bridge.md §4.1) AND the local dual-EMQX test
+# rig (D-B14). EMQX everywhere (D-B13) — the ecosystem's established broker (ggcommons
+# test-infra/compose.yaml is the house-style precedent this mirrors).
+#
+# Two services:
+#   site    Always started. The SITE broker — the aggregation point every device's uns-bridge
+#           uplinks to. Exposes plaintext (dev convenience, NOT the ACL boundary — see below) and
+#           mutual-TLS (the real boundary: acl.conf + cert-CN-as-username, TLS.md). One instance
+#           per site/gateway box in production.
+#   device  Opt-in (compose profile "dual"). A second, unsecured EMQX standing in for the
+#           device-local broker so this file alone gives you a full two-broker rig when you don't
+#           already have the ggcommons monorepo's `ggcommons-emqx` (test-infra/compose.yaml)
+#           running. If you DO already have it (the common case on this dev machine — see
+#           ../../../CLAUDE.md), skip the "dual" profile: the existing broker on :1883/:8883 is the
+#           device bus, this file's `site` service is the only thing you're adding.
+#
+# Usage:
+#   bash gen-tls-certs.sh                    # once — CA + server cert + a worked-example client
+#                                             # cert (CN=gw-01); see TLS.md for the full story
+#   cp .env.example .env                     # then edit if you need non-default ports
+#   docker compose up -d                     # site broker only (the common case)
+#   docker compose --profile dual up -d      # site broker + a throwaway device broker too
+#   docker compose down                      # stop + remove
+#
+# Then point a bridge's config at it, e.g. test-configs/config.json's `siteBroker` (plaintext,
+# :1884, no ACL enforcement — see README.md "Two ways to run this locally") or the mTLS example in
+# TLS.md (:8884, the real boundary).
+#
+# PRODUCTION: deploy only the `site` service, on its own site-gateway host, and override
+# SITE_MQTT_PORT=1883/SITE_MQTTS_PORT=8883 in .env (no device broker shares that host, so there's
+# no port clash to dodge) — then firewall or disable the plaintext listener entirely (§4.1: "1883
+# disabled or firewalled to the gateway host"). Persist /opt/emqx/data by adding a named volume if
+# this broker's retained state matters to you (the UNS itself never retains — DESIGN-uns.md — so by
+# default this compose does NOT persist EMQX state; add a volume only for EMQX-internal things like
+# dashboard users).
+
+services:
+  site:
+    image: emqx/emqx:${SITE_IMAGE_TAG:-5.8.2}
+    container_name: uns-bridge-emqx-site
+    ports:
+      - "${SITE_MQTT_PORT:-1884}:1883"     # plaintext — dev convenience ONLY, not ACL-enforced (see acl.conf)
+      - "${SITE_MQTTS_PORT:-8884}:8883"    # mutual-TLS — the real boundary (cert CN -> username -> acl.conf)
+      - "${SITE_DASHBOARD_PORT:-18084}:18083"
+    volumes:
+      # The ACL file is EMQX's DEFAULT file-authorization source path (etc/acl.conf), so mounting
+      # it here is sufficient to activate it — no authorization.sources env-var wiring needed (EMQX
+      # 5.x has had env-array regressions for that key across patch releases; a mounted file avoids
+      # them entirely). See TLS.md for why plaintext connections still get denied by this file.
+      - ./acl.conf:/opt/emqx/etc/acl.conf:ro
+      - ./tls-certs:/opt/emqx/etc/certs:ro
+    environment:
+      # mTLS listener: present the site's server cert, verify the client against the same CA, and
+      # require a client cert (no anonymous mTLS). Mirrors ggcommons/test-infra/compose.yaml's
+      # existing mutual-TLS listener style.
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE: /opt/emqx/etc/certs/ca.crt
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE: /opt/emqx/etc/certs/server.crt
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__KEYFILE: /opt/emqx/etc/certs/server.key
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__VERIFY: verify_peer
+      EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__FAIL_IF_NO_PEER_CERT: "true"
+      # This recipe is plain MQTT only (tcp:default + ssl:default above) — EMQX also ships
+      # WebSocket listeners (ws:default :8083, wss:default :8084) enabled out of the box. wss looks
+      # for certs at a DIFFERENT default path (`etc/certs/{cert,key,cacert}.pem`) than the ones we
+      # supply above and **crashes the whole broker on boot** if they're absent (verified while
+      # building this recipe). Disable both rather than duplicate the cert wiring for a transport
+      # this recipe doesn't use.
+      EMQX_LISTENERS__WS__DEFAULT__ENABLE: "false"
+      EMQX_LISTENERS__WSS__DEFAULT__ENABLE: "false"
+      # The identity model the ACL depends on: map the verified client cert's CN to the MQTT
+      # username, so acl.conf's `${username}` placeholders resolve to the device token (TLS.md).
+      EMQX_MQTT__PEER_CERT_AS_USERNAME: cn
+      # Anonymous (no username) connections exist ONLY on the plaintext listener in this dev
+      # compose; they fall through acl.conf's trailing `{deny, all}.` — belt-and-suspenders, the
+      # broker-wide default if a rule file somehow matched nothing is also deny, not EMQX's own
+      # allow default.
+      EMQX_AUTHORIZATION__NO_MATCH: deny
+      EMQX_ALLOW_ANONYMOUS: "true"   # plaintext dev listener only; mTLS still requires a valid cert regardless
+    healthcheck:
+      test: ["CMD", "emqx_ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  device:
+    image: emqx/emqx:${DEVICE_IMAGE_TAG:-5.8.2}
+    container_name: uns-bridge-emqx-device
+    profiles: ["dual"]   # `docker compose --profile dual up -d` — skip this if ggcommons-emqx already runs
+    ports:
+      - "${DEVICE_MQTT_PORT:-1883}:1883"
+      - "${DEVICE_DASHBOARD_PORT:-18083}:18083"
+    environment:
+      # No ACL: the device bus is the existing trust boundary (one broker per device, no fleet
+      # aggregation happens here) — matches ggcommons-emqx's own posture (test-infra/compose.yaml).
+      EMQX_ALLOW_ANONYMOUS: "true"
+    healthcheck:
+      test: ["CMD", "emqx_ctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

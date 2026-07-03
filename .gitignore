@@ -8,3 +8,8 @@ greengrass-build/
 # Cargo.lock excluded until P3-6 bumps the ggcommons pin to the UNS-core rev on main and regenerates
 # it (the current lock records the local .cargo [patch] path, invalid on a fresh clone).
 /Cargo.lock
+
+# site-broker local dev artifacts (generated dev/test certs, local port overrides) — never commit
+# key material, even throwaway dev-only material (deploy/site-broker/gen-tls-certs.sh, TLS.md).
+/deploy/site-broker/tls-certs/
+/deploy/site-broker/.env

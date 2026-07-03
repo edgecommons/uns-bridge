@@ -233,6 +233,17 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 
 (The telemetry-processor pattern; delete the file for a pure git-rev build.)
 
+## Deploying the site broker (P3-5, D-B13)
+
+The bridge and the site broker deploy **as a pair** — see
+[`deploy/site-broker/README.md`](deploy/site-broker/README.md) for the full recipe set: a
+`docker-compose.yml` for HOST (and the local dual-EMQX dev/test rig it doubles as), a
+`greengrass/recipe.yaml` sketch running the same compose via
+`aws.greengrass.DockerApplicationManager`, `k8s/` manifests for the in-cluster aggregation broker
+(no bridge runs inside a cluster, with one documented boundary-pod exception), and the per-device
+**ACL** (`acl.conf`) that is the actual security boundary — the bridge's own raw-provider relay
+(§1.3 above) carries no in-process guard, so an ACL-less site broker has no boundary at all.
+
 ## Repo layout
 
 | Path | What |
@@ -245,7 +256,8 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 | `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; the relay's `-relay`-suffixed device connection; typed `reply` + `uplink` knobs |
 | `src/main.rs` | The GgCommons runtime (observability) + the relay's raw connections (device fatal, site retried), the D-B11 LWT cross-check, graceful stop |
 | `test-configs/` | Sample dual-broker config |
-| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs (finalized in P3-5/P3-6) |
+| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs for the **bridge itself** (finalized in P3-6) |
+| `deploy/site-broker/` | The **site broker's** deploy recipes (P3-5, D-B13): HOST compose, GREENGRASS `DockerApplicationManager` recipe, KUBERNETES manifests, and the per-device ACL — see [`deploy/site-broker/README.md`](deploy/site-broker/README.md) |
 
 ## Roadmap (the Phase-3 slices)
 
@@ -255,7 +267,7 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 | **P3-3** | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | **done** |
 | **P3-4** | per-class uplink policy: enables, token-bucket rate caps, D-B10 disconnect behavior + the bounded drop-oldest `evt` replay buffer with in-order reconnect replay; per-class drop counters | **done** |
 | **P3-4b** | the bridge's own GgCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); the D-B11 LWT startup cross-check; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
-| P3-5 | `deploy/site-broker/` recipes (HOST compose, GG DockerApplicationManager, k8s boundary notes, the per-device **ACL** file) | pending |
+| **P3-5** | `deploy/site-broker/` recipes (HOST compose + dual-EMQX dev rig, GG DockerApplicationManager, k8s in-cluster broker + boundary-bridge example, the per-device **ACL** file, TLS notes) | **done** |
 | P3-6 | registry entry, docs-site sync, dual-EMQX e2e + 3-platform validation | pending |
 
 Also follow-ups: the GREENGRASS variant (PRIMARY = Nucleus IPC); the standard
