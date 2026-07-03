@@ -31,7 +31,8 @@ Manifests:
       # (DESIGN-uns-bridge.md §8 risk 9: "recipes pin the image tag").
       - Uri: "docker:emqx/emqx:5.8.2"
       # acl.conf + tls-certs/ + docker-compose.yml + .env, zipped and staged to S3 by the build
-      # step (P3-6). GDK unpacks archive artifacts under {artifacts:decompressedPath}/<zip-stem>/.
+      # step (a release-time item — root README "Remaining release-time items"). GDK unpacks
+      # archive artifacts under {artifacts:decompressedPath}/<zip-stem>/.
       - Uri: "s3://BUCKET_NAME/COMPONENT_NAME/COMPONENT_VERSION/site-broker-config.zip"
         Unarchive: ZIP
     Lifecycle:

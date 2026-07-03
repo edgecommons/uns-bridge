@@ -2,7 +2,8 @@
 # PACKAGING STUB (P3-2). The GREENGRASS deployment of the bridge runs the binary against the
 # Nucleus; note the PRIMARY = IPC variant of the relay is a documented follow-up — this recipe
 # currently assumes a device-local MQTT broker as the primary (HOST-style config via GG_CONFIG).
-# Finalized alongside deploy/site-broker/ in P3-5 and org integration in P3-6.
+# The site-broker half landed in P3-5 (deploy/site-broker/); the remaining packaging wiring is
+# a release-time item (README "Remaining release-time items").
 RecipeFormatVersion: "2020-01-25"
 ComponentName: "com.mbreissi.uns-bridge"
 ComponentVersion: "1.0.0"

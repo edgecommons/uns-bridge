@@ -222,6 +222,42 @@ cargo test
 cargo clippy --all-targets
 ```
 
+### The dual-EMQX end-to-end test (P3-6)
+
+The bridge-level relay proof against two **real** brokers — one command, needs only Docker + cargo
+(runs on Windows Git Bash, Linux, macOS):
+
+```bash
+bash tests/e2e/run.sh
+```
+
+It boots a throwaway two-EMQX rig (`tests/e2e/docker-compose.e2e.yml`: a device broker and a site
+broker, plaintext/anonymous, **dedicated ports `:21883`/`:21884`** so it never collides with the
+standing `ggcommons-emqx` on `:1883` or the P3-5 site broker on `:1884` — override with
+`E2E_DEVICE_PORT`/`E2E_SITE_PORT`), then runs `tests/e2e_dual_broker.rs`, which spawns the **real
+bridge binary** against the shipped sample config (ports swapped in) and asserts, over live MQTT,
+per assertion with a printed PASS/FAIL:
+
+- **A1–A3 uplink** — a `state` envelope, an `evt` envelope (with channel), and a **raw** `data`
+  payload published on the device bus arrive **topic-verbatim** on the site broker; envelopes carry
+  the appended hop tag, the raw payload is **byte-verbatim**;
+- **B downlink** — an own-device `cmd` published on the site broker arrives (hop-tagged) on the
+  device bus;
+- **C pinning** — a `cmd` addressed to another device is **not** relayed;
+- **D reply round-trip** — a site-side request's `reply_to` is rewritten to a bridge-minted topic
+  on the way down, and the device-side reply returns to the **original** site reply topic
+  (`correlation_id`/body intact, `reply_to` dropped) — the §2.4 proxy, live;
+- **E loop-drop** — an envelope already stamped with the bridge's own hop id is dropped, never
+  re-relayed;
+- **F observability** — the bridge's own heartbeat `state` keepalive **and** the §2.8
+  relay-counter `metric`s appear on the device bus (and ride the bridge's own relay to the site).
+
+The Rust test is `#[ignore]`d and additionally gated on `UNS_BRIDGE_E2E=1`, so a plain
+`cargo test` (or even `--include-ignored` without the rig) never touches it. The brokers are torn
+down on exit either way; runtime ≈ 40 s (dominated by the 30 s first metric-emission tick).
+The security-boundary counterpart — the ACL'd/mTLS site broker denying cross-device publishes —
+is deliberately **not** this test: see `deploy/site-broker/` (P3-5).
+
 **Local development against the sibling library**: this repo pins `ggcommons` by git rev in
 `Cargo.toml` (what CI resolves). For local dev, a **gitignored** `.cargo/config.toml` patches the
 dep to the sibling checkout — create it as:
@@ -256,7 +292,8 @@ The bridge and the site broker deploy **as a pair** — see
 | `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; the relay's `-relay`-suffixed device connection; typed `reply` + `uplink` knobs |
 | `src/main.rs` | The GgCommons runtime (observability) + the relay's raw connections (device fatal, site retried), the D-B11 LWT cross-check, graceful stop |
 | `test-configs/` | Sample dual-broker config |
-| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs for the **bridge itself** (finalized in P3-6) |
+| `tests/e2e_dual_broker.rs`, `tests/e2e/` | The P3-6 **dual-EMQX end-to-end test** (real binary between two real brokers, assertions A–F above) + its rig (`run.sh`, `docker-compose.e2e.yml`) |
+| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs for the **bridge itself** (finalized with the GREENGRASS/IPC variant follow-up) |
 | `deploy/site-broker/` | The **site broker's** deploy recipes (P3-5, D-B13): HOST compose, GREENGRASS `DockerApplicationManager` recipe, KUBERNETES manifests, and the per-device ACL — see [`deploy/site-broker/README.md`](deploy/site-broker/README.md) |
 
 ## Roadmap (the Phase-3 slices)
@@ -268,15 +305,31 @@ The bridge and the site broker deploy **as a pair** — see
 | **P3-4** | per-class uplink policy: enables, token-bucket rate caps, D-B10 disconnect behavior + the bounded drop-oldest `evt` replay buffer with in-order reconnect replay; per-class drop counters | **done** |
 | **P3-4b** | the bridge's own GgCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); the D-B11 LWT startup cross-check; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
 | **P3-5** | `deploy/site-broker/` recipes (HOST compose + dual-EMQX dev rig, GG DockerApplicationManager, k8s in-cluster broker + boundary-bridge example, the per-device **ACL** file, TLS notes) | **done** |
-| P3-6 | registry entry, docs-site sync, dual-EMQX e2e + 3-platform validation | pending |
+| **P3-6** | the repeatable **dual-EMQX bridge-level e2e** (`tests/e2e/run.sh` — real binary between two real brokers, 9/9 assertions A–F green) + the `edgecommons/registry` catalog entry (`category: bridge`) | **done** |
+
+### Remaining release-time items
+
+Held deliberately until the UNS core lands on the ggcommons remote `main` / until release:
+
+- **GitHub remote + git-rev pin bump**: create `edgecommons/uns-bridge` on GitHub, bump the
+  `Cargo.toml` `ggcommons` git-rev pin from the pre-UNS placeholder to the UNS-core rev (today the
+  code builds only via the gitignored sibling `[patch]` — a pure git-rev build does not compile),
+  and regenerate `Cargo.lock` against that rev.
+- **The 4-language ggcommons `republish-state`/`republish-cfg` broadcast listener** (device side)
+  — until it lands, the bridge's reconnect rehydration broadcast is published but answered by
+  nobody (inert).
+- **The edge-console as the first site-side client** — the full-system test (console ↔ site broker
+  ↔ bridge ↔ device components), a later phase; the P3-6 e2e above is the *bridge-level* proof
+  only.
+- **Docs-site sync + 3-platform validation** (HOST is proven by the e2e; GREENGRASS rides the
+  IPC-variant follow-up below; KUBERNETES = the boundary-bridge deploy of `deploy/site-broker/k8s/`).
 
 Also follow-ups: the GREENGRASS variant (PRIMARY = Nucleus IPC); the standard
 `-c`/`--platform`/`--transport` CLI contract (today the minimal `--config`/`--thing` CLI
 synthesizes the standard argv internally) and template substitution across the whole
-`instances[]` entry; **the 4-language ggcommons library `republish-state`/`republish-cfg`
-broadcast listener** (device side — until it lands the bridge's reconnect rehydration broadcast
-is inert); and a Rust-only library affordance exposing the runtime's raw `MessagingProvider` so
-the relay can share the runtime's device-bus connection (see "How it connects").
+`instances[]` entry; and a Rust-only library affordance exposing the runtime's raw
+`MessagingProvider` so the relay can share the runtime's device-bus connection (see "How it
+connects").
 
 ## Operational rules
 

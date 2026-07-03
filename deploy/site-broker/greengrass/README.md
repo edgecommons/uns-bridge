@@ -3,8 +3,9 @@
 Deploys the site broker as a Greengrass-managed Docker container on the gateway core, via the
 stock `aws.greengrass.DockerApplicationManager` component — **not** a bespoke Java/Python/Rust/TS
 component. `recipe.yaml` here is a **packaging stub** (P3-5); the bucket/version placeholders and
-the actual zip-build step are finalized in P3-6 alongside the rest of org integration
-(`registry/components.json`, CI).
+the actual zip-build step are release-time items (see the root README's "Remaining release-time
+items") alongside CI/image publishing — the `registry/components.json` entry itself landed in
+P3-6.
 
 ## Why DockerApplicationManager, not a custom component
 
