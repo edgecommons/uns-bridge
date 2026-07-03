@@ -41,7 +41,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "tim
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# (tracing-subscriber removed in P3-4b: the GgCommons runtime owns logging init,
+# from the config's `logging` section.)
 anyhow = "1"
 
 [dev-dependencies]

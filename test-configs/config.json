@@ -7,8 +7,10 @@
     "requestTimeoutSeconds": 30
   },
 
+  "heartbeat": { "enabled": true, "intervalSecs": 5 },
+  "metricEmission": { "target": "messaging" },
+
   "component": {
-    "name": "com.mbreissi.uns-bridge",
     "instances": [
       {
         "id": "site",

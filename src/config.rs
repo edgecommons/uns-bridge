@@ -14,7 +14,9 @@
 //! (per-class enable/rate-caps + the D-B10 `evt` replay buffer —
 //! [`crate::policy`]); the `reply` knobs ([`ReplyConfig`]) are enforced since
 //! P3-3 (the `reply_to` rewrite, [`crate::reply`]). `lwt` is applied at CONNECT
-//! by the reused provider already; the startup topic cross-check is P3-4b.
+//! by the reused provider, and since P3-4b its topic is template-resolved and
+//! cross-checked against the bridge's real state topic at startup (§2.6/D-B11 —
+//! advisory WARN, [`crate::observability`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -47,13 +49,12 @@ pub struct BridgeConfig {
     pub component: ComponentSection,
 }
 
-/// The `component` config section.
+/// The `component` config section. There is deliberately no `name` member: the
+/// canonical schema's `component` section allows only `global`/`instances`
+/// (`additionalProperties:false`) — the component's full name is supplied by the
+/// runtime builder (`GgCommonsBuilder::new`), never by config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComponentSection {
-    /// The component's full name (informational until the facade integration).
-    #[serde(default)]
-    #[allow(dead_code)] // read by tests today; the facade integration consumes it
-    pub name: Option<String>,
     /// Per-instance entries; the bridge's site broker lives in the entry with
     /// id [`SITE_INSTANCE_ID`].
     #[serde(default)]
@@ -267,9 +268,25 @@ impl BridgeConfig {
             .with_context(|| format!("parsing bridge config {}", path.display()))
     }
 
-    /// The PRIMARY (device-bus) connection's [`MessagingConfig`].
-    pub fn primary_messaging(&self) -> MessagingConfig {
-        MessagingConfig { messaging: self.messaging.clone() }
+    /// The relay's own raw device-bus connection config: the standard `messaging`
+    /// section with `-relay` appended to every client id, and no LWT.
+    ///
+    /// Since P3-4b the bridge holds **two** device-bus connections (README
+    /// "Connections"): the GgCommons runtime builds the observability connection
+    /// from the config **file** (this same `messaging` section — it doubles as the
+    /// `--transport MQTT` payload), and the relay holds this second raw one. The
+    /// suffix keeps the two MQTT client ids distinct (a shared id makes the broker
+    /// bounce the clients in a session-takeover loop); a configured `messaging.lwt`
+    /// belongs to the runtime's connection and is stripped here so the will is
+    /// never registered twice.
+    pub fn relay_primary_messaging(&self) -> MessagingConfig {
+        let mut messaging = self.messaging.clone();
+        messaging.local.client_id = format!("{}-relay", messaging.local.client_id);
+        if let Some(iot) = messaging.iot_core.as_mut() {
+            iot.client_id = format!("{}-relay", iot.client_id);
+        }
+        messaging.lwt = None;
+        MessagingConfig { messaging }
     }
 
     /// The site-broker instance entry: the entry with id [`SITE_INSTANCE_ID`], or —
@@ -314,7 +331,6 @@ mod tests {
             "requestTimeoutSeconds": 30
         },
         "component": {
-            "name": "com.mbreissi.uns-bridge",
             "instances": [
                 { "id": "site",
                   "siteBroker": { "host": "site-broker.dallas.example", "port": 8883,
@@ -334,7 +350,6 @@ mod tests {
     #[test]
     fn parses_the_full_section_2_7_shape() {
         let cfg: BridgeConfig = serde_json::from_str(FULL).unwrap();
-        assert_eq!(cfg.component.name.as_deref(), Some("com.mbreissi.uns-bridge"));
         let site = cfg.site_instance().unwrap();
         assert_eq!(site.id, "site");
         assert_eq!(site.effective_max_hops(), 6);
@@ -404,11 +419,16 @@ mod tests {
     }
 
     #[test]
-    fn primary_messaging_wraps_the_standard_section() {
+    fn relay_primary_messaging_wraps_the_section_with_a_distinct_client_id() {
         let cfg: BridgeConfig = serde_json::from_str(FULL).unwrap();
-        let mc = cfg.primary_messaging();
+        let mc = cfg.relay_primary_messaging();
         assert_eq!(mc.messaging.local.resolved_host().unwrap(), "localhost");
         assert_eq!(mc.messaging.local.port, 1883);
+        // The GgCommons runtime connects with the CONFIGURED id (from the file);
+        // the relay's raw connection must never collide with it.
+        assert_eq!(mc.messaging.local.client_id, "uns-bridge-local-relay");
+        assert!(mc.messaging.iot_core.is_none());
+        assert!(mc.messaging.lwt.is_none(), "a device-bus LWT belongs to the runtime connection");
     }
 
     #[test]

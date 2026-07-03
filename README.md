@@ -17,17 +17,31 @@ site connection for fast whole-device reachability detection.
 Design source of truth: `docs/platform/DESIGN-uns-bridge.md` (and `DESIGN-uns.md` §9) in the
 ggcommons monorepo. Section references below (§…) point there.
 
-## How it connects (§1, §2.1)
+## How it connects (§1, §2.1, §2.8)
+
+Since P3-4b the bridge is a **proper ggcommons component**: a real `GgCommons` runtime (built from
+the same config file) owns the bridge's own observability. The bridge therefore holds **three**
+connections:
 
 | Connection | What | Built from |
 |---|---|---|
-| **PRIMARY** | the device-local bus | the standard `messaging` config section (HOST: local MQTT broker; GREENGRASS IPC variant is a follow-up) |
-| **SITE** | the site UNS broker — the bridge's **external system** | the bridge's own `component.instances[]` `"site"` entry, by **reusing the ggcommons core's public MQTT objects**: `MqttProvider::connect(&site_cfg)` — zero library change |
+| **OBSERVABILITY** (device bus) | the `GgCommons` runtime: identity, the automatic heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` publisher, `gg.metrics()` (`metricEmission.target = "messaging"`), logging init, SIGTERM handling | the standard `messaging` config section — the config file doubles as the `--transport MQTT` payload |
+| **RELAY PRIMARY** (device bus) | the raw byte relay (§1.3) + reply proxy + rehydration broadcast | the same `messaging` section with the client id suffixed **`-relay`** (two MQTT clients must not share an id) and any `lwt` stripped (the will belongs to the runtime connection) |
+| **SITE** | the site UNS broker — the bridge's **external system**; carries the D-B11 LWT | the bridge's own `component.instances[]` `"site"` entry, by **reusing the ggcommons core's public MQTT objects**: `MqttProvider::connect(&site_cfg)` — zero library change |
 
-The relay runs at the **raw `MessagingProvider` level** on both connections (byte relay). The
-reserved-class publish guard is a `MessagingService` concern and is deliberately not in this path
-(§1.3) — the site broker's **per-device ACL** is the durable boundary: a bridge may publish only
-under its own `ecv1/{device}/#` subtree.
+Why two device-bus connections: `GgCommons` deliberately does **not** expose its raw
+`MessagingProvider` (`DefaultMessagingService` keeps it private), and the relay must stay at the
+raw provider level — byte-verbatim, no reserved-class guard (§1.3) — so sharing the runtime's
+connection would require a ggcommons change this slice deliberately does not make. The cost is one
+extra local TCP client on the device broker (trivial on HOST/EMQX). *Follow-up (Rust-only library
+affordance)*: expose the runtime's raw provider (e.g. `DefaultMessagingService::provider()`) so
+the relay can share it — one client less, which matters under the GREENGRASS shared-connection
+quota once the IPC-primary variant lands.
+
+The relay runs at the **raw `MessagingProvider` level** on both of its connections (byte relay).
+The reserved-class publish guard is a `MessagingService` concern and is deliberately not in this
+path (§1.3) — the site broker's **per-device ACL** is the durable boundary: a bridge may publish
+only under its own `ecv1/{device}/#` subtree.
 
 The site uplink is intermittent by design (edge-first): the bridge comes up and serves the device
 bus while the WAN is down, retrying the site connect in its own loop (§1.4); the provider
@@ -104,10 +118,40 @@ decision:
   (topic-verbatim, hop tag already stamped) and the buffer clears (`evt_replayed`); overflow while
   down evicts the oldest (`evt_buffer_dropped`). A live `evt` arriving while older ones are still
   queued joins the queue rather than overtaking them.
-- **Not yet** (the next slice): on the reconnect rising edge the bridge will also broadcast
-  `republish-state`/`republish-cfg` on the device bus (`ecv1/{device}/_bcast/main/cmd/…`) so the
-  site view rehydrates `state`/`cfg` without retain (DESIGN-uns §9.3 layer 2) — a documented TODO
-  at the connectivity watcher in `src/io.rs`.
+- **Reconnect rehydration** (DESIGN-uns §9.3 layer 2) — on the site-reconnect **rising edge** the
+  bridge publishes `ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg` on the
+  **device bus** (best-effort, notification-style `cmd` envelopes, **before** the `evt` replay) so
+  every component's re-announce can ride the uplink and the site view rehydrates `state`/`cfg`
+  without retain. Startup is not an edge — the relay only starts after the site link is first
+  established. **Bridge side only / currently inert**: the device-side listener that answers the
+  broadcast (components re-publishing their `state` keepalive and effective `cfg` on demand) is a
+  separate **4-language ggcommons library** slice; until it lands the broadcast is published but
+  answered by nobody.
+
+## The bridge's own observability (§2.8, P3-4b)
+
+Nothing bespoke: the heartbeat publishes the bridge's `state` keepalive on the device bus, the
+`cfg` publisher announces its (redacted) effective config, and the §2.5 counters emit as
+`metric`s — all of it matches the uplink filters and is **relayed by the bridge itself**, so the
+site broker sees the bridge exactly as it sees any component (plus the LWT only it sets).
+
+Every **30 s** a task snapshots the relay counters and emits them through `gg.metrics()`
+(`ecv1/{device}/uns-bridge/main/metric/<name>` with the shipped `messaging` target). Counters emit
+**interval deltas**, gauges the current value:
+
+| Metric | Measures | Kind |
+|---|---|---|
+| `relay_uplinked`, `relay_dropped_disabled`, `relay_dropped_rate`, `relay_dropped_disconnected` | per class: `state` `cfg` `evt` `metric` `data` `log` `app` | counters |
+| `relay_downlinked`, `relay_loop_dropped`, `relay_routed_dropped`, `relay_malformed_dropped`, `relay_publish_failed`, `relay_reply_relayed`, `relay_reply_expired`, `relay_reply_stray`, `relay_evt_buffered`, `relay_evt_buffer_dropped`, `relay_evt_replayed` | `count` | counters |
+| `relay_pending_replies` | `count` | gauge |
+| `site_connected` | `connected` (0/1) | gauge |
+
+**LWT startup cross-check** (§2.6/§3.7, D-B11): at startup the bridge template-resolves the
+configured site `lwt.topic` and compares it against its **real** state topic
+(`gg.uns().topic(State)` — what the keepalive actually publishes on). A mismatch (the classic
+misconfig: a typo'd or unsanitized device token) logs a **WARN**; a missing site LWT also WARNs
+(whole-device UNREACHABLE detection would not work). The check is advisory — config stays
+authoritative and the configured value is still what gets registered.
 
 ## Configuration (§2.7)
 
@@ -119,11 +163,14 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
 
 ```jsonc
 {
-  "messaging": {                       // PRIMARY: the device-local bus
+  "messaging": {                       // the device-local bus (runtime + relay connections)
     "local": { "host": "localhost", "port": 1883, "clientId": "uns-bridge-local" }
   },
+  "heartbeat": { "enabled": true, "intervalSecs": 5 },   // the automatic state keepalive
+  "metricEmission": { "target": "messaging" },           // §2.8 counters ride the UNS metric class
   "component": {
-    "name": "com.mbreissi.uns-bridge",
+    // NOTE: no `component.name` — the canonical schema allows only global/instances
+    // there; the component's full name is supplied by the runtime builder.
     "instances": [
       { "id": "site",                  // the SITE broker — the bridge's external system
         "siteBroker": { "host": "site-broker.dallas.example", "port": 8883,
@@ -145,14 +192,14 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
 }
 ```
 
-Notes for the current slice: values are concrete (template substitution like `{ThingName}` arrives
-with the full facade integration); the `lwt` entry is already applied at CONNECT by the reused
-provider (the startup topic cross-check lands in P3-4b); the `uplink` policy (per-class
-enables/rate caps + the `evt` replay buffer, §2.5 / D-B10) and the `reply` knobs (§2.4) are fully
-enforced. The relay/reply/policy counters (`uplinked`, `dropped_disabled`/`dropped_rate`/
-`dropped_disconnected` per class, `evt_buffered`/`evt_buffer_dropped`/`evt_replayed`,
-`reply_relayed`, `reply_expired`, `reply_stray`, the `pending_replies` gauge, …) are held
-in-process and logged at shutdown; publishing them as `metric`s lands in P3-4b (§2.5 table).
+Notes for the current slice: the config file is validated against the **canonical ggcommons
+schema** at startup (the runtime loads it via `-c FILE`) — a shipped-config test pins that it
+passes. Template substitution (`{ThingName}` → the sanitized device token) is resolved for the
+**site `lwt.topic` only** (the load-bearing case, §1.2); templates elsewhere in the `instances[]`
+entry stay literal until the full facade integration. The `lwt` entry is applied at CONNECT by
+the reused provider and cross-checked at startup (D-B11, above); the `uplink` policy (§2.5 /
+D-B10) and the `reply` knobs (§2.4) are fully enforced; the counters publish as `metric`s every
+30 s (§2.8, above) and are still logged once at shutdown.
 
 ## Run locally (HOST)
 
@@ -161,9 +208,11 @@ in-process and logged at shutdown; publishing them as `metric`s lands in P3-4b (
 cargo run -- --config ./test-configs/config.json --thing gw-01
 ```
 
-Device identity: `-t/--thing` or `GGCOMMONS_THING_NAME`. Logging: `RUST_LOG` (default `info`).
-Graceful shutdown (Ctrl-C / SIGTERM) aborts the pumps and **unsubscribes every filter at both
-brokers** before exit.
+Device identity: `-t/--thing` or `GGCOMMONS_THING_NAME`. Logging is owned by the ggcommons
+runtime (the config's `logging` section; default console `info`). Graceful shutdown (Ctrl-C /
+SIGTERM, via the library's signal watcher) aborts the pumps and **unsubscribes every filter at
+both brokers** before exit. The bridge's own `state` keepalive / `cfg` announce / `metric`
+emission appear on the device bus immediately and on the site broker once the relay runs.
 
 ## Building
 
@@ -188,12 +237,13 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 
 | Path | What |
 |---|---|
-| `src/relay.rs` | The **pure** relay decision engine: §2.2 class routing + own-device pinning, §2.3 hop tag — no IO, fully unit-tested |
+| `src/relay.rs` | The **pure** relay decision engine: §2.2 class routing + own-device pinning, §2.3 hop tag, the §9.3 rehydration-topic derivation — no IO, fully unit-tested |
 | `src/reply.rs` | The **pure** §2.4 reply proxy logic: the TTL'd correlation map (`rewrite_downlink`/`take`/`sweep`, evict-oldest) + the reply back-haul transform — no IO, injected clock |
 | `src/policy.rs` | The **pure** §2.5/D-B10 uplink policy: per-class enables, token buckets (injected clock), and the bounded drop-oldest `evt` replay buffer — no IO |
-| `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (evt replay); counters; unsubscribe-on-shutdown (incl. pending reply topics) |
-| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; typed `reply` + `uplink` knobs |
-| `src/main.rs` | Two connections (primary fatal, site retried), signal handling, graceful stop |
+| `src/observability.rs` | The **pure** §2.8 pieces: the counter→metric mapping (snapshot deltas → named measure groups) + the D-B11 LWT cross-check — no IO |
+| `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (rising-edge rehydration broadcast + evt replay) + the 30 s metric emission; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
+| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; the relay's `-relay`-suffixed device connection; typed `reply` + `uplink` knobs |
+| `src/main.rs` | The GgCommons runtime (observability) + the relay's raw connections (device fatal, site retried), the D-B11 LWT cross-check, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs (finalized in P3-5/P3-6) |
 
@@ -204,13 +254,17 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 | **P3-2** | repo scaffold; relay engine (six uplink filters + pinned downlink, topic-verbatim, hop tag/maxHops); unit tests over trait fakes | **done** |
 | **P3-3** | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | **done** |
 | **P3-4** | per-class uplink policy: enables, token-bucket rate caps, D-B10 disconnect behavior + the bounded drop-oldest `evt` replay buffer with in-order reconnect replay; per-class drop counters | **done** |
-| P3-4b | counters published as `metric`s (§2.5 table) + the bridge's own GgCommons observability; reconnect `republish-*` `_bcast` rehydration (needs the library's Phase-3 broadcast listener); LWT startup cross-check | pending |
+| **P3-4b** | the bridge's own GgCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); the D-B11 LWT startup cross-check; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
 | P3-5 | `deploy/site-broker/` recipes (HOST compose, GG DockerApplicationManager, k8s boundary notes, the per-device **ACL** file) | pending |
 | P3-6 | registry entry, docs-site sync, dual-EMQX e2e + 3-platform validation | pending |
 
-Also follow-ups: the GREENGRASS variant (PRIMARY = Nucleus IPC) and the full ggcommons facade
-integration (standard CLI contract, heartbeat/state + `cfg` announce + metric counters riding the
-bridge's own relay, §2.8).
+Also follow-ups: the GREENGRASS variant (PRIMARY = Nucleus IPC); the standard
+`-c`/`--platform`/`--transport` CLI contract (today the minimal `--config`/`--thing` CLI
+synthesizes the standard argv internally) and template substitution across the whole
+`instances[]` entry; **the 4-language ggcommons library `republish-state`/`republish-cfg`
+broadcast listener** (device side — until it lands the bridge's reconnect rehydration broadcast
+is inert); and a Rust-only library affordance exposing the runtime's raw `MessagingProvider` so
+the relay can share the runtime's device-bus connection (see "How it connects").
 
 ## Operational rules
 

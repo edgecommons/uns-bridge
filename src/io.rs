@@ -26,24 +26,44 @@
 //! (non-`evt` drops + counts while the site link is down or a publish fails;
 //! `evt` rides a bounded drop-oldest replay buffer). A **connectivity watcher**
 //! task polls `site.connected()` and drains the buffer, strictly in order,
-//! whenever the link is up and something is queued.
+//! whenever the link is up and something is queued; on the **rising edge**
+//! (site reconnect) it first publishes the two §2.5 / DESIGN-uns §9.3 (layer 2)
+//! rehydration broadcasts `ecv1/{device}/_bcast/main/cmd/republish-{state,cfg}`
+//! on the DEVICE bus — best-effort, before the `evt` replay — so the site view
+//! rehydrates `state`/`cfg` without retain. **Bridge side only**: the device-side
+//! listener that answers the broadcast is a separate 4-language ggcommons library
+//! slice; until it lands the broadcast is inert (published, answered by nobody).
+//!
+//! With an [`ObservabilityHook`] (P3-4b, §2.8) a periodic task additionally
+//! snapshots the [`RelayCounters`] and emits them as `metric`s through
+//! `gg.metrics()` (the pure mapping lives in [`crate::observability`]); the
+//! messaging metric target then publishes them on
+//! `ecv1/{device}/uns-bridge/main/metric/<name>` — which matches the bridge's own
+//! uplink filters, so the counters ride the bridge's own relay to the site.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use ggcommons::messaging::{Destination, MessagingProvider, Qos, Subscription};
+use ggcommons::config::model::Config;
+use ggcommons::messaging::{Destination, MessageBuilder, MessagingProvider, Qos, Subscription};
+use ggcommons::metrics::{MetricBuilder, MetricService};
 use tokio::task::JoinHandle;
 
 use crate::config::{QueueConfig, ReplyConfig, UplinkConfig};
+use crate::observability::{relay_metric_groups, metric_definitions, RelaySnapshot};
 use crate::policy::{class_index, EvtPush, UplinkPolicy, UplinkVerdict, POLICY_CLASSES};
-use crate::relay::{Direction, DropReason, RelayDecision, RelayEngine};
+use crate::relay::{Direction, DropReason, RelayDecision, RelayEngine, REHYDRATION_CMDS};
 use crate::reply::{prepare_reply, DownlinkRewrite, ReplyCorrelator, ReplyRelay};
 use ggcommons::uns::UnsClass;
 
 /// Cadence of the connectivity watcher that replays buffered `evt` once the
 /// site link is (back) up (§2.5 / D-B10 reconnect replay).
 const CONNECTIVITY_POLL: Duration = Duration::from_millis(250);
+
+/// Cadence of the §2.8 metric emission (the [`RelayCounters`] → `gg.metrics()`
+/// task): counters emit as interval deltas every tick, gauges as current values.
+const METRIC_EMIT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Per-class counters over the seven policy-governed uplink classes (the §2.5
 /// metric table's per-class measures). `cmd` is not policy-governed and has no
@@ -60,7 +80,7 @@ impl ClassCounters {
     }
 
     /// `class`'s current count.
-    #[allow(dead_code)] // the per-class observability seam (P3-4b); exercised by the tests
+    #[allow(dead_code)] // the per-class test seam; production reads via snapshot()/total()
     pub fn get(&self, class: UnsClass) -> u64 {
         class_index(class).map_or(0, |i| self.0[i].load(Ordering::Relaxed))
     }
@@ -69,14 +89,20 @@ impl ClassCounters {
     pub fn total(&self) -> u64 {
         self.0.iter().map(|c| c.load(Ordering::Relaxed)).sum()
     }
+
+    /// A point-in-time copy of every class slot ([`POLICY_CLASSES`] order) — the
+    /// per-class half of the §2.8 [`RelaySnapshot`].
+    pub fn snapshot(&self) -> [u64; POLICY_CLASSES.len()] {
+        std::array::from_fn(|i| self.0[i].load(Ordering::Relaxed))
+    }
 }
 
 /// Relay counters (observable seams for tests now; surfaced as `metric`s through
 /// the normal metric subsystem in P3-4b — §2.5 table).
 #[derive(Debug, Default)]
 pub struct RelayCounters {
-    /// Messages relayed device → site.
-    pub uplinked: AtomicU64,
+    /// Messages relayed device → site, per class (`relay_uplinked`, §2.5 table).
+    pub uplinked: ClassCounters,
     /// Commands relayed site → device.
     pub downlinked: AtomicU64,
     /// Dropped by the hop-tag guard (`relay_loop_dropped`: own echo + maxHops).
@@ -332,7 +358,7 @@ impl UplinkGovernor {
         let retained = (class == UnsClass::Evt).then(|| (topic.clone(), bytes.clone()));
         match self.site.publish(&topic, bytes, Destination::Local, Qos::AtLeastOnce).await {
             Ok(()) => {
-                self.counters.uplinked.fetch_add(1, Ordering::Relaxed);
+                self.counters.uplinked.incr(class);
                 tracing::debug!(topic, "relayed up");
             }
             Err(e) => {
@@ -377,6 +403,74 @@ impl UplinkGovernor {
     }
 }
 
+/// The §2.8 observability wiring handed to [`RelayIo::start`]: the component's
+/// `gg.metrics()` service plus the config snapshot the metric definitions stamp
+/// their identity/namespace from. `None` runs the relay without the periodic
+/// metric emission (tests; the counters stay readable in-process either way).
+pub struct ObservabilityHook {
+    /// `gg.metrics()` — the emission path (`metricEmission.target`, `messaging`
+    /// in the shipped config → `ecv1/{device}/uns-bridge/main/metric/<name>`).
+    pub metrics: Arc<dyn MetricService>,
+    /// `gg.config()` — supplies namespace + thingName/componentName dimensions.
+    pub config: Arc<Config>,
+}
+
+/// A point-in-time [`RelaySnapshot`] of the live counters + gauges (the pure
+/// §2.8 mapping input).
+fn take_snapshot(
+    counters: &RelayCounters,
+    pending_replies: usize,
+    site_connected: bool,
+) -> RelaySnapshot {
+    RelaySnapshot {
+        uplinked: counters.uplinked.snapshot(),
+        dropped_disabled: counters.dropped_disabled.snapshot(),
+        dropped_rate: counters.dropped_rate.snapshot(),
+        dropped_disconnected: counters.dropped_disconnected.snapshot(),
+        downlinked: counters.downlinked.load(Ordering::Relaxed),
+        loop_dropped: counters.loop_dropped.load(Ordering::Relaxed),
+        routed_dropped: counters.routed_dropped.load(Ordering::Relaxed),
+        malformed_dropped: counters.malformed_dropped.load(Ordering::Relaxed),
+        publish_failed: counters.publish_failed.load(Ordering::Relaxed),
+        reply_relayed: counters.reply_relayed.load(Ordering::Relaxed),
+        reply_expired: counters.reply_expired.load(Ordering::Relaxed),
+        reply_stray: counters.reply_stray.load(Ordering::Relaxed),
+        evt_buffered: counters.evt_buffered.load(Ordering::Relaxed),
+        evt_buffer_dropped: counters.evt_buffer_dropped.load(Ordering::Relaxed),
+        evt_replayed: counters.evt_replayed.load(Ordering::Relaxed),
+        pending_replies: pending_replies as u64,
+        site_connected,
+    }
+}
+
+/// Publish the two §2.5 / DESIGN-uns §9.3 (layer 2) rehydration broadcasts on the
+/// DEVICE bus — best-effort (a failed broadcast only degrades the site view's
+/// rehydration; the evt replay still runs). Each is a notification-style `cmd`
+/// envelope (no `reply_to`, empty body); the exact payload contract is finalized
+/// with the 4-language library listener slice — until that lands, the broadcast
+/// is inert (published, answered by nobody).
+async fn publish_rehydration_bcast(device_bus: &Arc<dyn MessagingProvider>, topics: &[String; 2]) {
+    for (cmd, topic) in REHYDRATION_CMDS.iter().zip(topics.iter()) {
+        let bytes = match MessageBuilder::new(*cmd, "1.0")
+            .payload(serde_json::json!({}))
+            .build()
+            .to_vec()
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(cmd, error = %e, "rehydration broadcast serialization failed");
+                continue;
+            }
+        };
+        match device_bus.publish(topic, bytes, Destination::Local, Qos::AtLeastOnce).await {
+            Ok(()) => tracing::info!(topic = %topic, "rehydration broadcast published (site reconnect)"),
+            Err(e) => {
+                tracing::warn!(topic = %topic, error = %e, "rehydration broadcast publish failed (best-effort)")
+            }
+        }
+    }
+}
+
 /// The running relay: pump tasks + the subscriptions they own, with counters.
 pub struct RelayIo {
     engine: Arc<RelayEngine>,
@@ -398,9 +492,12 @@ impl RelayIo {
     /// Queue depths come from `queue` (`data` deep, others shallow — §2.2); the
     /// reply-proxy knobs (`ttlSecs`/`maxPending`) come from `reply` (§2.4); the
     /// per-class uplink policy (enables/rate caps/`evt` buffer — §2.5 / D-B10)
-    /// comes from `uplink`. Two periodic tasks run alongside the pumps: the
-    /// §2.4 TTL sweep (`min(ttl/4, 5 s)`) and the §2.5 connectivity watcher
-    /// ([`CONNECTIVITY_POLL`]) that replays buffered `evt`.
+    /// comes from `uplink`. Periodic tasks run alongside the pumps: the §2.4 TTL
+    /// sweep (`min(ttl/4, 5 s)`), the §2.5 connectivity watcher
+    /// ([`CONNECTIVITY_POLL`]) — which publishes the two rehydration broadcasts
+    /// on the DEVICE bus at the site-reconnect rising edge, then replays buffered
+    /// `evt` — and, with an [`ObservabilityHook`], the §2.8 metric emission
+    /// ([`METRIC_EMIT_INTERVAL`]).
     ///
     /// # Errors
     /// A failed SUBSCRIBE on either connection surfaces immediately (the bridge
@@ -412,6 +509,7 @@ impl RelayIo {
         queue: &QueueConfig,
         reply: &ReplyConfig,
         uplink: &UplinkConfig,
+        observability: Option<ObservabilityHook>,
     ) -> ggcommons::Result<RelayIo> {
         let counters = Arc::new(RelayCounters::default());
         let reply_proxy = Arc::new(ReplyProxy {
@@ -480,29 +578,80 @@ impl RelayIo {
             },
         )));
 
-        // The §2.5 connectivity watcher: drain the evt replay buffer whenever
-        // the site link is up and something is queued (covers the reconnect
-        // rising edge AND the publish-failed-while-nominally-connected case).
+        // The §2.5 connectivity watcher: on the RISING EDGE of `site.connected()`
+        // (site reconnect) it publishes the two §9.3-layer-2 rehydration
+        // broadcasts on the DEVICE bus (best-effort) and then replays the evt
+        // buffer; otherwise it drains the buffer whenever the link is up and
+        // something is queued (covers the publish-failed-while-nominally-
+        // connected case, where no edge ever fires). The baseline is the
+        // connected() state at start — the bridge only starts its relay after
+        // main established the site link, so startup itself is not an edge
+        // (§2.5: "on each site-connection RE-establishment").
         //
-        // TODO(P3-4 follow-up slice — §2.5 / D-B10 / DESIGN-uns §9.3 layer 2):
-        // on the RISING EDGE of `site.connected()`, publish
-        // `ecv1/{device}/_bcast/main/cmd/republish-state` and
-        // `…/republish-cfg` on the DEVICE bus BEFORE replaying buffered evt,
-        // so the site view rehydrates `state`/`cfg` without retain. That
-        // rehydration broadcast (and the library's `_bcast` listener it rides
-        // on) is deliberately NOT part of this slice.
+        // BRIDGE SIDE ONLY: the device-side `republish-*` listener that answers
+        // the broadcast is a separate 4-language ggcommons library slice —
+        // until it lands the broadcast is inert (see README "Reconnect
+        // rehydration").
         {
             let governor = Arc::clone(&governor);
+            let device_bus = Arc::clone(&primary);
+            let rehydration = engine.rehydration_topics().clone();
             tasks.push(tokio::spawn(async move {
                 let mut tick = tokio::time::interval(CONNECTIVITY_POLL);
+                let mut was_connected = governor.site.connected();
                 loop {
                     tick.tick().await;
-                    // Bind the count first: the policy guard must never be
-                    // held across the replay await.
-                    let pending = governor.policy().buffered_evt();
-                    if pending > 0 && governor.site.connected() {
+                    let connected = governor.site.connected();
+                    if connected && !was_connected {
+                        // Rising edge: rehydration broadcast BEFORE the evt
+                        // replay (§2.5 — buffered events replay after it).
+                        publish_rehydration_bcast(&device_bus, &rehydration).await;
                         governor.replay_buffered_evt().await;
+                    } else if connected {
+                        // Bind the count first: the policy guard must never be
+                        // held across the replay await.
+                        let pending = governor.policy().buffered_evt();
+                        if pending > 0 {
+                            governor.replay_buffered_evt().await;
+                        }
                     }
+                    was_connected = connected;
+                }
+            }));
+        }
+
+        // The §2.8 metric emission (P3-4b): snapshot the counters every
+        // METRIC_EMIT_INTERVAL and emit them through gg.metrics() — counters as
+        // interval deltas, gauges as current values (the pure mapping + names
+        // live in crate::observability). The messaging metric target puts them
+        // on ecv1/{device}/uns-bridge/main/metric/<name>, where they match the
+        // bridge's own uplink filters and ride its own relay to the site (§2.8).
+        if let Some(hook) = observability {
+            let counters = Arc::clone(&counters);
+            let proxy = Arc::clone(&reply_proxy);
+            let site = Arc::clone(&site);
+            tasks.push(tokio::spawn(async move {
+                for def in metric_definitions() {
+                    let mut builder = MetricBuilder::create(def.name).with_config(&hook.config);
+                    for measure in &def.measures {
+                        builder = builder.add_measure(*measure, def.unit, 60);
+                    }
+                    hook.metrics.define_metric(builder.build());
+                }
+                let mut prev = RelaySnapshot::default();
+                let mut tick = tokio::time::interval(METRIC_EMIT_INTERVAL);
+                tick.tick().await; // consume the immediate tick — first emission after one interval
+                loop {
+                    tick.tick().await;
+                    let curr =
+                        take_snapshot(&counters, proxy.correlator().len(), site.connected());
+                    for group in relay_metric_groups(&prev, &curr) {
+                        if let Err(e) = hook.metrics.emit_metric(group.name, group.values).await {
+                            // Best-effort: a down device bus must not kill the task.
+                            tracing::debug!(metric = group.name, error = %e, "relay metric emit failed");
+                        }
+                    }
+                    prev = curr;
                 }
             }));
         }
@@ -666,7 +815,6 @@ mod tests {
     use crate::relay::{DEFAULT_MAX_HOPS, RELAY_TAG};
     use async_trait::async_trait;
     use ggcommons::messaging::topic_matches;
-    use ggcommons::messaging::MessageBuilder;
     use serde_json::{json, Value};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -802,6 +950,7 @@ mod tests {
             &QueueConfig::default(),
             &reply,
             &uplink,
+            None, // metric emission is main-wired; the pure mapping has its own tests
         )
         .await
         .unwrap();
@@ -834,7 +983,8 @@ mod tests {
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
         assert_eq!(v["body"]["status"], "RUNNING");
-        assert_eq!(io.counters().uplinked.load(Ordering::Relaxed), 1);
+        assert_eq!(io.counters().uplinked.get(UnsClass::State), 1, "uplinked counts per class");
+        assert_eq!(io.counters().uplinked.total(), 1);
         io.shutdown().await;
     }
 
@@ -1233,7 +1383,7 @@ mod tests {
             .await
             .unwrap();
         assert!(wait_until(|| !site.published().is_empty()).await, "state must still relay");
-        assert_eq!(io.counters().uplinked.load(Ordering::Relaxed), 1);
+        assert_eq!(io.counters().uplinked.total(), 1);
         assert_eq!(io.counters().dropped_disabled.total(), 1);
         io.shutdown().await;
     }
@@ -1272,7 +1422,7 @@ mod tests {
             "the over-cap drops must be counted"
         );
         assert_eq!(site.published().len(), 1, "only the burst token's message passes");
-        assert_eq!(io.counters().uplinked.load(Ordering::Relaxed), 1);
+        assert_eq!(io.counters().uplinked.get(UnsClass::Data), 1);
         io.shutdown().await;
     }
 
@@ -1450,6 +1600,74 @@ mod tests {
         assert_eq!(evt_ns_at_site(&site), vec![1, 2], "requeue-front preserves order");
         assert_eq!(io.buffered_evt(), 0);
         assert_eq!(io.counters().evt_buffer_dropped.load(Ordering::Relaxed), 0);
+        io.shutdown().await;
+    }
+
+    // ---- the §2.5 / §9.3-layer-2 reconnect rehydration broadcast (P3-4b) ----
+
+    const BCAST_STATE: &str = "ecv1/gw-01/_bcast/main/cmd/republish-state";
+    const BCAST_CFG: &str = "ecv1/gw-01/_bcast/main/cmd/republish-cfg";
+
+    #[tokio::test]
+    async fn reconnect_publishes_the_two_rehydration_bcasts_then_replays_evt() {
+        let (io, device, site) = started().await;
+        site.set_connected(false);
+        device
+            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(wait_until(|| io.buffered_evt() == 1).await, "the evt must buffer while down");
+        let before = device.published().len(); // the test's own evt publish
+
+        site.set_connected(true);
+        assert!(
+            wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 1).await,
+            "the buffered evt must replay after the rising edge"
+        );
+
+        // The DEVICE bus saw exactly the two broadcasts, in REHYDRATION_CMDS
+        // order, published on the rising edge (the code path runs them BEFORE
+        // the evt replay).
+        let bcasts: Vec<(String, Vec<u8>)> = device.published().split_off(before);
+        let topics: Vec<&str> = bcasts.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(topics, vec![BCAST_STATE, BCAST_CFG]);
+        // Notification-style cmd envelopes: named, no reply_to, empty body.
+        let v: Value = serde_json::from_slice(&bcasts[0].1).unwrap();
+        assert_eq!(v["header"]["name"], "republish-state");
+        assert!(v["header"].get("reply_to").is_none(), "a broadcast expects no reply");
+        assert_eq!(v["body"], json!({}));
+        let v: Value = serde_json::from_slice(&bcasts[1].1).unwrap();
+        assert_eq!(v["header"]["name"], "republish-cfg");
+
+        // And nothing echoed back up: cmd matches no uplink filter (§2.2).
+        assert_eq!(evt_ns_at_site(&site), vec![1]);
+        assert!(site.published().iter().all(|(t, _)| !t.contains("_bcast")));
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn no_rehydration_bcast_without_a_reconnect_edge() {
+        // Startup with a connected site link is NOT an edge (the baseline is the
+        // state at start), and neither is a mere failed-publish recovery.
+        let (io, device, site) = started().await;
+        tokio::time::sleep(Duration::from_millis(600)).await; // several watcher ticks
+        assert!(device.published().is_empty(), "no broadcast at plain startup");
+
+        // Failed-publish recovery without a connected() edge: the evt drains via
+        // the pending>0 branch — still no broadcast.
+        site.set_fail_publish(true);
+        device
+            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(wait_until(|| io.buffered_evt() == 1).await);
+        site.set_fail_publish(false);
+        assert!(wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 1).await);
+        assert_eq!(
+            device.published().len(),
+            1,
+            "only the test's own evt publish — no broadcast without a rising edge"
+        );
         io.shutdown().await;
     }
 }

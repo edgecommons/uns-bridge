@@ -46,6 +46,13 @@ pub const DEFAULT_MAX_HOPS: usize = 4;
 /// the LWT topic, and the console all assume exactly this token.
 pub const COMPONENT_TOKEN: &str = "uns-bridge";
 
+/// The two §2.5 / DESIGN-uns §9.3 (layer 2) reconnect-rehydration broadcast
+/// command names, in publish order — published on the DEVICE bus at the site
+/// reconnect rising edge so the site view rehydrates `state`/`cfg` without
+/// retain. (The device-side listener is a separate 4-language ggcommons library
+/// slice; the broadcast is inert until it lands.)
+pub const REHYDRATION_CMDS: [&str; 2] = ["republish-state", "republish-cfg"];
+
 /// The six always-relayed uplink classes (§2.2 — the fleet consumer wildcard set).
 /// `app` is deliberately not here: it is opt-in via [`RelayEngine::new`].
 pub const UPLINK_CLASSES: [UnsClass; 6] = [
@@ -104,6 +111,7 @@ pub struct RelayEngine {
     app_enabled: bool,
     uplink_filters: Vec<(UnsClass, String)>,
     downlink_filter: String,
+    rehydration_topics: [String; 2],
 }
 
 impl RelayEngine {
@@ -143,8 +151,30 @@ impl RelayEngine {
         }
         let downlink_filter = uns.filter(UnsClass::Cmd, &UnsScope::device(device.clone()))?;
 
+        // The §2.5 reconnect-rehydration broadcast topics
+        // (`ecv1/{device}/_bcast/main/cmd/republish-*`) — built through the
+        // library like every other topic: `_bcast` is a valid (reserved-token)
+        // component position, `cmd` is an open class.
+        let bcast = MessageIdentity::new(
+            vec![HierEntry { level: "device".to_string(), value: device.clone() }],
+            "_bcast",
+            None,
+        )?;
+        let rehydration_topics = [
+            uns.topic_for(&bcast, UnsClass::Cmd, Some(REHYDRATION_CMDS[0]))?,
+            uns.topic_for(&bcast, UnsClass::Cmd, Some(REHYDRATION_CMDS[1]))?,
+        ];
+
         let hop_id = format!("{device}/{COMPONENT_TOKEN}");
-        Ok(RelayEngine { device, hop_id, max_hops, app_enabled, uplink_filters, downlink_filter })
+        Ok(RelayEngine {
+            device,
+            hop_id,
+            max_hops,
+            app_enabled,
+            uplink_filters,
+            downlink_filter,
+            rehydration_topics,
+        })
     }
 
     /// This bridge's hop identifier (`{device}/uns-bridge`) — unique per bus.
@@ -169,6 +199,13 @@ impl RelayEngine {
     /// `ecv1/{device}/+/+/cmd/#` (the `+` component position also covers `_bcast`).
     pub fn downlink_filter(&self) -> &str {
         &self.downlink_filter
+    }
+
+    /// The two device-bus `_bcast` topics published at the site-reconnect rising
+    /// edge (§2.5 / DESIGN-uns §9.3 layer 2), in [`REHYDRATION_CMDS`] order:
+    /// `ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg`.
+    pub fn rehydration_topics(&self) -> &[String; 2] {
+        &self.rehydration_topics
     }
 
     /// Decide whether (and as what bytes) to relay `payload` seen on `topic` in
@@ -347,6 +384,18 @@ mod tests {
     fn hop_id_is_device_slash_component() {
         assert_eq!(engine().hop_id(), HOP);
         assert_eq!(engine().device(), DEVICE);
+    }
+
+    #[test]
+    fn rehydration_topics_are_the_two_bcast_cmds_on_own_device() {
+        // §2.5 / DESIGN-uns §9.3 layer 2 — REHYDRATION_CMDS order.
+        assert_eq!(
+            engine().rehydration_topics(),
+            &[
+                "ecv1/gw-01/_bcast/main/cmd/republish-state".to_string(),
+                "ecv1/gw-01/_bcast/main/cmd/republish-cfg".to_string(),
+            ]
+        );
     }
 
     // ---- class routing (§2.2 matrix) ----
