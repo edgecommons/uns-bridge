@@ -23,8 +23,10 @@
 //!   and are protected structurally by the uplink∩downlink class disjointness.
 //!
 //! The IO wiring that pumps subscriptions through this engine lives in
-//! [`crate::io`]; the reply-`reply_to` rewrite (P3-3) and per-class uplink policy /
-//! rate caps (P3-4) slot in around this module without changing it.
+//! [`crate::io`]; the reply-`reply_to` rewrite (P3-3, [`crate::reply`]) slots in
+//! around this engine, reusing [`RelayEngine::stamp_hop`] for the reply back-haul
+//! ("a relay like any other", §2.4); per-class uplink policy / rate caps (P3-4)
+//! slot in the same way.
 
 use ggcommons::messaging::message::{HierEntry, Message, MessageIdentity, MessageTags};
 use ggcommons::uns::{Uns, UnsClass, UnsScope};
@@ -213,27 +215,9 @@ impl RelayEngine {
             // verbatim (never re-serialize a raw as `{"raw": …}`).
             return RelayDecision::Forward(payload.to_vec());
         }
-
-        let tags = msg.tags.get_or_insert_with(MessageTags::default);
-        let mut hops = match tags.extra.get(RELAY_TAG) {
-            Some(Value::Array(hops)) => hops.clone(),
-            Some(other) => {
-                // `_`-prefixed tag keys are library-reserved; a non-array `_relay`
-                // is a spec violation by a non-conforming relay. Normalize it (the
-                // maxHops cap still bounds any residual cycle).
-                tracing::warn!(topic, value = %other, "non-array tags._relay; normalizing");
-                Vec::new()
-            }
-            None => Vec::new(),
-        };
-        if hops.iter().any(|h| h.as_str() == Some(self.hop_id.as_str())) {
-            return RelayDecision::Drop(DropReason::OwnEcho);
+        if let Err(reason) = self.stamp_hop(&mut msg) {
+            return RelayDecision::Drop(reason);
         }
-        if hops.len() >= self.max_hops {
-            return RelayDecision::Drop(DropReason::MaxHopsExceeded);
-        }
-        hops.push(Value::String(self.hop_id.clone()));
-        tags.extra.insert(RELAY_TAG.to_string(), Value::Array(hops));
 
         // 3. Re-serialize (structurally identical envelope + the appended hop tag,
         //    D-U22 — serde member order is deterministic).
@@ -244,6 +228,44 @@ impl RelayEngine {
                 RelayDecision::Drop(DropReason::MalformedEnvelope)
             }
         }
+    }
+
+    /// Apply the §2.3 hop rules to a parsed envelope **in place**: drop-if-self
+    /// (rule 1), drop at `maxHops` (rule 2), else append this bridge's own hop id
+    /// (rule 3), creating the `tags`/`_relay` members as needed. A raw message is
+    /// an `Ok` no-op — it cannot carry the tag (protected structurally, §2.3).
+    ///
+    /// Shared by [`Self::decide`] and the reply back-haul
+    /// ([`crate::reply::prepare_reply`] — "the reply also gets the hop tag
+    /// appended: it is a relay like any other", §2.4).
+    ///
+    /// # Errors
+    /// The [`DropReason`] mandating the drop (`OwnEcho` / `MaxHopsExceeded`).
+    pub fn stamp_hop(&self, msg: &mut Message) -> std::result::Result<(), DropReason> {
+        if msg.is_raw() {
+            return Ok(());
+        }
+        let tags = msg.tags.get_or_insert_with(MessageTags::default);
+        let mut hops = match tags.extra.get(RELAY_TAG) {
+            Some(Value::Array(hops)) => hops.clone(),
+            Some(other) => {
+                // `_`-prefixed tag keys are library-reserved; a non-array `_relay`
+                // is a spec violation by a non-conforming relay. Normalize it (the
+                // maxHops cap still bounds any residual cycle).
+                tracing::warn!(value = %other, "non-array tags._relay; normalizing");
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        if hops.iter().any(|h| h.as_str() == Some(self.hop_id.as_str())) {
+            return Err(DropReason::OwnEcho);
+        }
+        if hops.len() >= self.max_hops {
+            return Err(DropReason::MaxHopsExceeded);
+        }
+        hops.push(Value::String(self.hop_id.clone()));
+        tags.extra.insert(RELAY_TAG.to_string(), Value::Array(hops));
+        Ok(())
     }
 }
 
@@ -544,6 +566,15 @@ mod tests {
         );
         let RelayDecision::Forward(bytes) = d else { panic!("expected forward") };
         assert_eq!(forwarded_hops(&bytes), vec![HOP.to_string()]);
+    }
+
+    #[test]
+    fn stamp_hop_is_a_noop_for_raw_messages() {
+        // The reply back-haul calls stamp_hop directly; a raw reply has nothing
+        // to stamp and must pass through untouched.
+        let mut msg = Message::raw(json!({ "v": 1 }));
+        engine().stamp_hop(&mut msg).unwrap();
+        assert!(msg.tags.is_none(), "a raw message must not grow a tags member");
     }
 
     #[test]

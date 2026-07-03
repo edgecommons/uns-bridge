@@ -12,17 +12,20 @@
 //!
 //! Sections the later slices own are parsed and carried but not yet enforced:
 //! `uplink` per-class enable/rate-caps/buffers (P3-4 — only `classes.app.enabled`
-//! is honored today), `reply` (P3-3), `lwt` (applied at CONNECT by the reused
-//! provider already; the startup topic cross-check is P3-4).
+//! is honored today), `lwt` (applied at CONNECT by the reused provider already;
+//! the startup topic cross-check is P3-4). The `reply` knobs ([`ReplyConfig`])
+//! are enforced since P3-3 (the `reply_to` rewrite, [`crate::reply`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Context;
 use ggcommons::messaging::config::{BrokerConfig, LwtConfig, Messaging, MessagingConfig};
 use serde::Deserialize;
 
 use crate::relay::DEFAULT_MAX_HOPS;
+use crate::reply::{DEFAULT_MAX_PENDING, DEFAULT_REPLY_TTL_SECS};
 
 /// The default site-instance id (the documented convention, §2.1).
 pub const SITE_INSTANCE_ID: &str = "site";
@@ -81,11 +84,10 @@ pub struct InstanceEntry {
     /// Per-class subscription queue depths (§2.2).
     #[serde(default)]
     pub queue: QueueConfig,
-    /// Reply correlation-map knobs (`ttlSecs`/`maxPending`) — parsed opaquely,
-    /// consumed by the P3-3 reply-rewrite slice.
+    /// Reply correlation-map knobs (§2.4 / D-B9): the TTL'd map behind the
+    /// `reply_to` rewrite ([`crate::reply`]).
     #[serde(default)]
-    #[allow(dead_code)] // carried for P3-3 (reply_to rewrite)
-    pub reply: Option<serde_json::Value>,
+    pub reply: ReplyConfig,
 }
 
 impl InstanceEntry {
@@ -140,6 +142,49 @@ pub struct ClassPolicy {
     #[serde(flatten)]
     #[allow(dead_code)] // carried for P3-4 (rate caps / evt buffer / onDisconnect)
     pub rest: BTreeMap<String, serde_json::Value>,
+}
+
+/// The `reply` knobs (§2.4 / D-B9): the TTL'd correlation map behind the
+/// `reply_to` rewrite.
+///
+/// `ttlSecs` defaults to 60 — **2×** the framework's 30 s request-deadline
+/// default — so the bridge never tears down a reply path before the requester's
+/// own deadline settles it. Deployments raising
+/// `messaging.requestTimeoutSeconds` must raise this in step (a documented
+/// **paired knob**). `maxPending` bounds the in-flight entries; overflow evicts
+/// the oldest.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyConfig {
+    /// Correlation-entry TTL in seconds (default
+    /// [`DEFAULT_REPLY_TTL_SECS`]).
+    #[serde(default = "default_reply_ttl_secs")]
+    pub ttl_secs: u64,
+    /// In-flight entry bound (default [`DEFAULT_MAX_PENDING`]); overflow evicts
+    /// the oldest entry (expired early + counted).
+    #[serde(default = "default_max_pending")]
+    pub max_pending: usize,
+}
+
+impl ReplyConfig {
+    /// The TTL as a [`Duration`].
+    pub fn ttl(&self) -> Duration {
+        Duration::from_secs(self.ttl_secs)
+    }
+}
+
+fn default_reply_ttl_secs() -> u64 {
+    DEFAULT_REPLY_TTL_SECS
+}
+
+fn default_max_pending() -> usize {
+    DEFAULT_MAX_PENDING
+}
+
+impl Default for ReplyConfig {
+    fn default() -> Self {
+        ReplyConfig { ttl_secs: DEFAULT_REPLY_TTL_SECS, max_pending: DEFAULT_MAX_PENDING }
+    }
 }
 
 /// Per-class bounded subscription queue depths (`max_messages`, §2.2): `data`
@@ -253,7 +298,9 @@ mod tests {
         assert!(site.uplink.app_enabled());
         assert_eq!(site.queue.data, 256);
         assert_eq!(site.queue.default_depth, 32);
-        assert!(site.reply.is_some(), "reply knobs carried for P3-3");
+        assert_eq!(site.reply.ttl_secs, 60);
+        assert_eq!(site.reply.ttl(), Duration::from_secs(60));
+        assert_eq!(site.reply.max_pending, 1024);
         // P3-4 knobs survive parsing opaquely.
         let data = &site.uplink.classes["data"];
         assert_eq!(data.enabled, Some(true));
@@ -297,7 +344,27 @@ mod tests {
         assert!(!site.uplink.app_enabled(), "app is default OFF");
         assert_eq!(site.queue.data, DEFAULT_DATA_QUEUE);
         assert_eq!(site.queue.default_depth, DEFAULT_QUEUE);
+        assert_eq!(site.reply.ttl_secs, DEFAULT_REPLY_TTL_SECS);
+        assert_eq!(site.reply.max_pending, DEFAULT_MAX_PENDING);
         assert!(site.site_messaging().unwrap().messaging.lwt.is_none());
+    }
+
+    #[test]
+    fn partial_reply_section_fills_the_other_knob_with_its_default() {
+        let cfg: BridgeConfig = serde_json::from_str(
+            r#"{
+                "messaging": { "local": { "host": "h", "port": 1883, "clientId": "c" } },
+                "component": { "instances": [
+                    { "id": "site",
+                      "siteBroker": { "host": "s", "port": 1884, "clientId": "cs" },
+                      "reply": { "ttlSecs": 120 } }
+                ] }
+            }"#,
+        )
+        .unwrap();
+        let site = cfg.site_instance().unwrap();
+        assert_eq!(site.reply.ttl_secs, 120, "the paired-knob override");
+        assert_eq!(site.reply.max_pending, DEFAULT_MAX_PENDING);
     }
 
     #[test]

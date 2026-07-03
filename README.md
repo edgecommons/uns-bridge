@@ -9,9 +9,9 @@ the site broker under the device's namespace, and relays commands back down. Any
 consumer (a historian, an MES bridge, the edge console) then connects to **one** bus.
 
 Unlike a dumb broker bridge it is envelope-aware: it stamps a **hop tag** for loop protection,
-rewrites `reply_to` for cross-bridge request/reply (P3-3), rate-caps the data plane (P3-4), and
-registers a Last-Will `UNREACHABLE` on the site connection for fast whole-device reachability
-detection.
+rewrites `reply_to` so site→device request/reply crosses the bridge (the TTL'd correlation map,
+§2.4), rate-caps the data plane (P3-4), and registers a Last-Will `UNREACHABLE` on the site
+connection for fast whole-device reachability detection.
 
 Design source of truth: `docs/platform/DESIGN-uns-bridge.md` (and `DESIGN-uns.md` §9) in the
 ggcommons monorepo. Section references below (§…) point there.
@@ -39,10 +39,10 @@ re-subscribes every filter on each CONNACK, so reconnection is transparent.
 | **Uplink** device → site | `state` `cfg` `evt` `metric` `data` `log` (six consumer wildcards; `app` opt-in, default **off**) | `ecv1/+/+/+/state` · `ecv1/+/+/+/cfg` · `ecv1/+/+/+/evt/#` · `ecv1/+/+/+/metric/#` · `ecv1/+/+/+/data/#` · `ecv1/+/+/+/log/#` | same topic string, on the site broker |
 | **Downlink** site → device | `cmd` only (broadcast rides the `+` component position → `_bcast`) | `ecv1/{device}/+/+/cmd/#` — **pinned to this bridge's own device** | same topic string, on the device bus |
 
-Explicit non-flows (v1): `cmd` is never uplinked (no cross-device request/reply); reply topics
-(`ggcommons/reply-…`, non-`ecv1`) never match a UNS filter and only cross via the P3-3 correlation
-map. The uplink∩downlink class **disjointness** is also the structural loop guard for raw
-(non-enveloped) messages.
+Explicit non-flows (v1): `cmd` is never uplinked (no cross-device request/reply, D-B7); reply
+topics (`ggcommons/reply-…`, non-`ecv1`) never match a UNS filter and only cross via the §2.4
+correlation map (below). The uplink∩downlink class **disjointness** is also the structural loop
+guard for raw (non-enveloped) messages.
 
 ### Hop-tag loop protection (§2.3)
 
@@ -58,6 +58,27 @@ Every relayed **envelope** gets the reserved tag `tags._relay` — a JSON array 
 Raw messages carry no tags and are protected by the class disjointness. Consumers ignore `_relay`
 (it doubles as the "which path did this message take" breadcrumb). Tag keys starting with `_` are
 library/system-reserved.
+
+### `reply_to` rewrite — the TTL'd correlation map (§2.4 / D-B9)
+
+Request/reply crossing the bridge breaks without rewriting: a site-side requester sets
+`header.reply_to = ggcommons/reply-<uuid>` — an ephemeral topic **on the site broker** — so a
+device-side responder would `reply()` onto the device bus where nobody listens. The bridge proxies
+the reply path:
+
+1. **Down**: a relayed `cmd` carrying `header.reply_to` gets a **bridge-minted** reply topic
+   (`ggcommons/reply-<uuid>`, the core's standard prefix) written into the header; the bridge
+   subscribes it on the device bus (**before** relaying the cmd; `max_messages = 1`,
+   first-reply-wins) and records `bridge topic → original site reply topic` in the correlation
+   map. A `cmd` **without** `reply_to` is a fire-and-forget notification and relays untouched.
+2. **Up**: the first message on a bridge reply topic relays to the **original site `reply_to`**
+   verbatim — `correlation_id` and body untouched, hop tag appended, `header.reply_to` dropped —
+   then the entry is removed and the bridge topic unsubscribed (one-shot).
+3. **TTL sweep**: entries expire after `reply.ttlSecs` (default **60 s = 2×** the framework's 30 s
+   request-deadline default — raise them **in step**, a paired knob); expiry unsubscribes the
+   bridge topic and counts `reply_expired`. The map is bounded by `reply.maxPending` (default
+   **1024**): overflow **evicts the oldest** entry (expired early + counted) rather than refusing
+   fresh commands. Stray/late replies with no live entry are dropped + counted.
 
 ## Configuration (§2.7)
 
@@ -82,7 +103,7 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
         "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state",     // §2.6: whole-device UNREACHABLE
                  "payload": { "status": "UNREACHABLE" }, "qos": 1 },
         "uplink": { "classes": { "app": { "enabled": false } } }, // P3-2 honors the app opt-in
-        "reply":  { "ttlSecs": 60, "maxPending": 1024 },          // P3-3
+        "reply":  { "ttlSecs": 60, "maxPending": 1024 },          // §2.4 correlation map (paired knob: 2× requestTimeoutSeconds)
         "maxHops": 4,
         "queue":  { "data": 512, "default": 64 } }                // per-class max_messages
     ]
@@ -93,7 +114,10 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
 Notes for the current slice: values are concrete (template substitution like `{ThingName}` arrives
 with the full facade integration); the `lwt` entry is already applied at CONNECT by the reused
 provider (the startup topic cross-check lands in P3-4); `uplink` per-class enables/rate-caps/buffers
-are parsed and carried but enforced in P3-4 (only `classes.app.enabled` is honored today).
+are parsed and carried but enforced in P3-4 (only `classes.app.enabled` is honored today); the
+`reply` knobs are fully enforced (P3-3). The relay/reply counters (`reply_relayed`,
+`reply_expired`, `reply_stray`, the `pending_replies` gauge, …) are held in-process and logged at
+shutdown; publishing them as `metric`s lands in P3-4 (§2.5 table).
 
 ## Run locally (HOST)
 
@@ -130,8 +154,9 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 | Path | What |
 |---|---|
 | `src/relay.rs` | The **pure** relay decision engine: §2.2 class routing + own-device pinning, §2.3 hop tag — no IO, fully unit-tested |
-| `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` → topic-verbatim republish; counters; unsubscribe-on-shutdown |
-| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig` |
+| `src/reply.rs` | The **pure** §2.4 reply proxy logic: the TTL'd correlation map (`rewrite_downlink`/`take`/`sweep`, evict-oldest) + the reply back-haul transform — no IO, injected clock |
+| `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` (+ the reply rewrite on the downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep task; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
+| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; typed `reply` knobs |
 | `src/main.rs` | Two connections (primary fatal, site retried), signal handling, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs (finalized in P3-5/P3-6) |
@@ -140,8 +165,8 @@ ggcommons = { path = "../ggcommons/libs/rust" }
 
 | Slice | Contents | Status |
 |---|---|---|
-| **P3-2** | repo scaffold; relay engine (six uplink filters + pinned downlink, topic-verbatim, hop tag/maxHops); unit tests over trait fakes | **this repo** |
-| P3-3 | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | pending |
+| **P3-2** | repo scaffold; relay engine (six uplink filters + pinned downlink, topic-verbatim, hop tag/maxHops); unit tests over trait fakes | **done** |
+| **P3-3** | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | **done** |
 | P3-4 | per-class uplink policy (enable/rate caps/evt buffer), drop-counter **metrics**, reconnect `republish-*` broadcast rehydration, LWT startup cross-check | pending |
 | P3-5 | `deploy/site-broker/` recipes (HOST compose, GG DockerApplicationManager, k8s boundary notes, the per-device **ACL** file) | pending |
 | P3-6 | registry entry, docs-site sync, dual-EMQX e2e + 3-platform validation | pending |

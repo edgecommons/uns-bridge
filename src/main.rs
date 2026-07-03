@@ -31,6 +31,7 @@
 mod config;
 mod io;
 mod relay;
+mod reply;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -166,6 +167,8 @@ async fn main() -> anyhow::Result<()> {
         max_hops = site_entry.effective_max_hops(),
         uplink_filters = engine.uplink_subscriptions().len(),
         downlink_filter = %engine.downlink_filter(),
+        reply_ttl_secs = site_entry.reply.ttl_secs,
+        reply_max_pending = site_entry.reply.max_pending,
         "uns-bridge starting"
     );
 
@@ -188,27 +191,35 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // The relay: six (+1) uplink pumps + the pinned downlink pump.
-    let relay = io::RelayIo::start(engine, primary, site, &site_entry.queue).await?;
+    // The relay: six (+1) uplink pumps + the pinned downlink pump + the §2.4
+    // reply proxy (correlation map + TTL sweep).
+    let relay =
+        io::RelayIo::start(engine, primary, site, &site_entry.queue, &site_entry.reply).await?;
     tracing::info!("relay running");
 
     shutdown_signal().await;
     tracing::info!("shutdown signal received; stopping relay");
 
-    let counters = {
+    let (uplinked, downlinked, loop_dropped, reply_relayed, reply_expired) = {
         use std::sync::atomic::Ordering;
         let c = relay.counters();
         (
             c.uplinked.load(Ordering::Relaxed),
             c.downlinked.load(Ordering::Relaxed),
             c.loop_dropped.load(Ordering::Relaxed),
+            c.reply_relayed.load(Ordering::Relaxed),
+            c.reply_expired.load(Ordering::Relaxed),
         )
     };
+    let pending_replies = relay.pending_replies();
     relay.shutdown().await; // aborts pumps + unsubscribes everything at both brokers
     tracing::info!(
-        uplinked = counters.0,
-        downlinked = counters.1,
-        loop_dropped = counters.2,
+        uplinked,
+        downlinked,
+        loop_dropped,
+        reply_relayed,
+        reply_expired,
+        pending_replies,
         "uns-bridge stopped"
     );
     Ok(())
