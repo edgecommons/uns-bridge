@@ -37,7 +37,7 @@ greengrass = ["ggcommons/greengrass"]
 # (pre-UNS, resolvable placeholder). A pure git-rev build therefore does NOT compile until the
 # release-time pin bump (README "Remaining release-time items") moves it to the UNS-core rev
 # once feat/unified-namespace lands on main (Cargo.lock regenerates with it).
-ggcommons = { git = "https://github.com/edgecommons/ggcommons.git", rev = "5865d3b14e947e8e0355ca4fcc470f1f2bb31f52", default-features = false }
+ggcommons = { git = "https://github.com/edgecommons/ggcommons.git", rev = "b1d8d85bed1e989928d083323ef8be98132d77d5", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
