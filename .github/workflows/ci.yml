@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+jobs:
+  ci:
+    # Reusable component CI from the org defaults repo (build + test + clippy -D warnings).
+    # `secrets: inherit` passes the org-level EDGECOMMONS_READ_TOKEN so cargo can fetch the private
+    # ggcommons git dependency; the repo must be on that secret's allow-list.
+    permissions:
+      contents: read
+    uses: edgecommons/.github/.github/workflows/component-ci.yml@main
+    with:
+      language: RUST
+      rust-features: "standalone"
+    secrets: inherit
