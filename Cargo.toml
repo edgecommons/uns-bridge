@@ -31,12 +31,12 @@ greengrass = ["ggcommons/greengrass"]
 # this rev, LOCAL DEV builds against the sibling checkout via the gitignored
 # .cargo/config.toml `[patch]` override and never touches this pin).
 #
-# NOTE (P3-2): this code REQUIRES the UNS core, which today lives only on the local
-# feat/unified-namespace branch (HEAD 798463ef) — not yet on the remote. Cargo must be able to
-# load the patched-over source, so the pin below is the current remote `main`
-# (pre-UNS, resolvable placeholder). A pure git-rev build therefore does NOT compile until the
-# release-time pin bump (README "Remaining release-time items") moves it to the UNS-core rev
-# once feat/unified-namespace lands on main (Cargo.lock regenerates with it).
+# The pin below is the UNS core on the remote `main`: rev b1d8d85 is the v0.2.0 UNS release
+# (`chore(release): bump ggcommons libs 0.1.1 -> 0.2.0 (UNS release)`), which carries the
+# grammar / top-level identity / `gg.uns()` / reserved-guard / `request()`-deadline / LWT
+# surface plus the `_bcast` republish listener this bridge relies on. A pure git-rev build
+# compiles against it; the gitignored `.cargo/config.toml` `[patch]` override is only for
+# local dev against uncommitted sibling-lib changes.
 ggcommons = { git = "https://github.com/edgecommons/ggcommons.git", rev = "b1d8d85bed1e989928d083323ef8be98132d77d5", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }

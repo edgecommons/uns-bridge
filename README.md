@@ -123,10 +123,11 @@ decision:
   **device bus** (best-effort, notification-style `cmd` envelopes, **before** the `evt` replay) so
   every component's re-announce can ride the uplink and the site view rehydrates `state`/`cfg`
   without retain. Startup is not an edge — the relay only starts after the site link is first
-  established. **Bridge side only / currently inert**: the device-side listener that answers the
-  broadcast (components re-publishing their `state` keepalive and effective `cfg` on demand) is a
-  separate **4-language ggcommons library** slice; until it lands the broadcast is published but
-  answered by nobody.
+  established. The device-side listener that answers the broadcast — components re-publishing
+  their `state` keepalive and effective `cfg` on demand — **shipped in the ggcommons library**
+  (`RepublishListener` in Java/Python/TS, `uns.rs` in Rust; on by default, jittered + coalesced),
+  so a rev-bumped component fleet rehydrates the site view on every bridge reconnect. The
+  broadcast is no longer inert.
 
 ## The bridge's own observability (§2.8, P3-4b)
 
@@ -307,29 +308,33 @@ The bridge and the site broker deploy **as a pair** — see
 | **P3-5** | `deploy/site-broker/` recipes (HOST compose + dual-EMQX dev rig, GG DockerApplicationManager, k8s in-cluster broker + boundary-bridge example, the per-device **ACL** file, TLS notes) | **done** |
 | **P3-6** | the repeatable **dual-EMQX bridge-level e2e** (`tests/e2e/run.sh` — real binary between two real brokers, 9/9 assertions A–F green) + the `edgecommons/registry` catalog entry (`category: bridge`) | **done** |
 
-### Remaining release-time items
+### Release state & remaining follow-ups
 
-Held deliberately until the UNS core lands on the ggcommons remote `main` / until release:
+Shipped at the v0.2.0 UNS release:
 
-- **GitHub remote + git-rev pin bump**: create `edgecommons/uns-bridge` on GitHub, bump the
-  `Cargo.toml` `ggcommons` git-rev pin from the pre-UNS placeholder to the UNS-core rev (today the
-  code builds only via the gitignored sibling `[patch]` — a pure git-rev build does not compile),
-  and regenerate `Cargo.lock` against that rev.
-- **The 4-language ggcommons `republish-state`/`republish-cfg` broadcast listener** (device side)
-  — until it lands, the bridge's reconnect rehydration broadcast is published but answered by
-  nobody (inert).
-- **The edge-console as the first site-side client** — the full-system test (console ↔ site broker
-  ↔ bridge ↔ device components), a later phase; the P3-6 e2e above is the *bridge-level* proof
-  only.
-- **Docs-site sync + 3-platform validation** (HOST is proven by the e2e; GREENGRASS rides the
-  IPC-variant follow-up below; KUBERNETES = the boundary-bridge deploy of `deploy/site-broker/k8s/`).
+- **GitHub remote + git-rev pin bump — done.** `edgecommons/uns-bridge` is published, and
+  `Cargo.toml` pins `ggcommons` at rev `b1d8d85` — the v0.2.0 UNS release on `main` — so a pure
+  git-rev build compiles against the shipped UNS core (the gitignored sibling `[patch]` override
+  is local-dev only).
+- **The 4-language `republish-state`/`republish-cfg` broadcast listener — done.** It shipped in
+  the ggcommons library (`RepublishListener` in Java/Python/TS, `uns.rs` in Rust), so the bridge's
+  reconnect rehydration broadcast is now answered by every rev-bumped component — no longer inert.
+- **The edge-console as the first site-side client — done.** The full-system test (console ↔ site
+  broker ↔ bridge ↔ device components) has been run and passed (HOST → kind); the P3-6 e2e above
+  remains the *bridge-level* proof.
 
-Also follow-ups: the GREENGRASS variant (PRIMARY = Nucleus IPC); the standard
-`-c`/`--platform`/`--transport` CLI contract (today the minimal `--config`/`--thing` CLI
-synthesizes the standard argv internally) and template substitution across the whole
-`instances[]` entry; and a Rust-only library affordance exposing the runtime's raw
-`MessagingProvider` so the relay can share the runtime's device-bus connection (see "How it
-connects").
+Still deferred (genuinely unbuilt):
+
+- **GREENGRASS/IPC-primary variant** (PRIMARY = Nucleus IPC, SITE = MQTT): the `greengrass`
+  feature today only compiles the library's IPC provider; the IPC-primary relay wiring is the
+  follow-up, and **GREENGRASS** deployment validation rides it (HOST is proven by the e2e and
+  KUBERNETES by the boundary-bridge deploy of `deploy/site-broker/k8s/`).
+- The standard `-c`/`--platform`/`--transport` CLI contract (today the minimal `--config`/`--thing`
+  CLI synthesizes the standard argv internally) and template substitution across the whole
+  `instances[]` entry.
+- A Rust-only library affordance exposing the runtime's raw `MessagingProvider` so the relay can
+  share the runtime's device-bus connection (see "How it connects").
+- Docs-site sync of this component's docs into the ggcommons website.
 
 ## Operational rules
 

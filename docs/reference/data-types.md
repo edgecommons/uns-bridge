@@ -120,9 +120,9 @@ On a site-reconnect rising edge the bridge publishes two notification-style `cmd
 { "header": { "name": "republish-state", "version": "1.0" }, "body": {} }
 ```
 
-They carry **no** `identity`, **no** `tags`, and **no** `reply_to` — fire-and-forget. The exact contract is
-finalized with the four-language device-side `RepublishListener` library slice; until deployed components run
-that listener, the broadcast is published but answered by nobody (inert). See
+They carry **no** `identity`, **no** `tags`, and **no** `reply_to` — fire-and-forget. The four-language
+device-side `RepublishListener` that answers them **shipped** in ggcommons v0.2.0 (on by default), so any
+component rev-bumped to that release answers automatically; only pre-rev-bump components stay silent. See
 [explanation → reconnect rehydration](../explanation.md#reconnect-rehydration).
 
 ## The LWT payload

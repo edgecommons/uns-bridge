@@ -36,11 +36,11 @@ a HOST or GREENGRASS gateway's bridge has to *its* site broker, just running as 
 process or a GG component. The manifest is marked **EXAMPLE ONLY** in its header because:
 
 - This repo does not yet ship a Dockerfile/image for the bridge (`image: REPLACE_ME`) — building
-  and publishing one is a release-time item (root README "Remaining release-time items"; the
+  and publishing one is a release-time item (root README "Release state & remaining follow-ups"; the
   registry entry itself landed in P3-6), not part of the site-broker recipes this slice delivers.
 - The bridge's CLI today is the minimal `--config <path> [--thing <name>]` form, not yet the
   standard `-c/--platform/--transport` contract every other ggcommons component has (see
-  `../../README.md` "Also follow-ups"). A mounted ConfigMap file path works fine as a `--config`
+  `../../README.md` "Still deferred (genuinely unbuilt)"). A mounted ConfigMap file path works fine as a `--config`
   argument, but the CONFIGMAP *source's* hot-reload-on-`..data`-swap behavior other components get
   is not there yet — a known, documented gap, not something this slice fixes.
 

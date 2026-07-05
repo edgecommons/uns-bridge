@@ -173,11 +173,12 @@ bus** — `ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg
 intent is that every device component re-announces its `state` keepalive and effective `cfg`, which then ride
 the uplink so the site view rehydrates without retain.
 
-Honesty about the current state: the bridge *publishes* these broadcasts (that half works), but a component
-only *answers* them if it runs the device-side `republish-*` listener. That listener is a **ggcommons library
-capability** (the four-language `RepublishListener`); until the components a given bridge relays for are built
-against a ggcommons that ships it *and* wire it up, the broadcast is published but answered by nobody — inert
-but harmless. See the repo `README.md` "Remaining release-time items."
+Current state: the bridge *publishes* these broadcasts, and a component *answers* them via the device-side
+`republish-*` listener. That listener is a **ggcommons library capability** — the four-language
+`RepublishListener`, which **shipped** in the UNS release (v0.2.0) and is **on by default** (library-owned
+plumbing, started automatically by the runtime; no component wiring). So every component rev-bumped to
+ggcommons v0.2.0+ answers automatically and the reconnect rehydration is real rather than inert; only
+pre-rev-bump components stay silent (harmless). See the repo `README.md` "Release state & remaining follow-ups."
 
 ## The bridge's own observability
 
