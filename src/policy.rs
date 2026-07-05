@@ -194,7 +194,7 @@ impl UplinkPolicy {
             {
                 tracing::warn!(
                     class = cls.token(),
-                    "bufferWhileDisconnected is honored for evt only (D-B10); ignored"
+                    "bufferWhileDisconnected is honored for evt only; ignored"
                 );
             }
             ClassState { enabled, bucket }

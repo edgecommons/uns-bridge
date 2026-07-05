@@ -343,7 +343,7 @@ impl UplinkGovernor {
                 }
                 UplinkVerdict::DropDisconnected => {
                     self.counters.dropped_disconnected.incr(class);
-                    tracing::debug!(topic, class = class.token(), "site link down; dropped (live path is not durable, D-B10)");
+                    tracing::debug!(topic, class = class.token(), "site link down; dropped (live path is not durable)");
                     return;
                 }
                 UplinkVerdict::DropRateCapped => {
@@ -536,7 +536,7 @@ impl RelayIo {
                 disabled_classes = ?disabled,
                 rate_capped_classes = ?rate_capped,
                 evt_buffer = policy.evt_buffer_capacity(),
-                "uplink policy active (§2.5 / D-B10)"
+                "uplink policy active"
             );
         }
         let governor = Arc::new(UplinkGovernor {

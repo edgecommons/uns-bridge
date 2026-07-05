@@ -243,7 +243,7 @@ pub fn check_lwt_topic(configured: Option<&str>, expected: &str) -> LwtCrossChec
 pub fn log_lwt_cross_check(check: &LwtCrossCheck) {
     match check {
         LwtCrossCheck::Match => {
-            tracing::info!("site LWT topic matches the bridge's state topic (D-B11 cross-check)");
+            tracing::info!("site LWT topic matches the bridge's state topic");
         }
         LwtCrossCheck::Mismatch { configured, expected } => {
             tracing::warn!(
