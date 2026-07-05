@@ -19,8 +19,8 @@ up both.
 
 ## 2. Start two brokers
 
-The device bus on `:1883` and the site bus on `:1884` — the layout the shipped
-[`test-configs/config.json`](../test-configs/config.json) already expects:
+The device bus on `:1883` and the site bus on `:1884` — the layout the bundled
+[`test-configs/config.json`](../test-configs/config.json) expects:
 
 ```bash
 docker run -d --name uns-device-broker -p 1883:1883 emqx/emqx
@@ -38,7 +38,7 @@ cargo run -- --config ./test-configs/config.json --thing gw-01
 
 You should see it (in order): initialize the ggcommons runtime against the **device** bus, establish the
 **relay's** own device-bus connection, run the **LWT cross-check**, connect to the **site** broker, subscribe
-its uplink filters, and log `relay running`. The device identity is `gw-01` (from `--thing`); the shipped
+its uplink filters, and log `relay running`. The device identity is `gw-01` (from `--thing`); the bundled
 config places it at `dallas/gw-01` via `hierarchy`/`identity`.
 
 Leave it running. It is now doing three things at once: mirroring its own health onto both buses, pumping
@@ -126,7 +126,7 @@ mosquitto_pub -p 1883 -t '<the-bridge-minted-reply-topic>' \
 
 Your `ggcommons/reply-demo` subscriber on the **site** bus receives it — `correlation_id` and body intact,
 `reply_to` stripped, hop tag appended. The bridge carried the reply back to the original site topic. That is
-the correlation map at work (§2.4).
+the correlation map at work.
 
 ## 8. See the disconnect story
 

@@ -80,8 +80,8 @@ Every uplinkable class can be switched off; a disabled class's messages are drop
 ```
 
 - **`app` is opt-in** — off by default, and off means its filter is never even subscribed.
-- **`log` is on by the code default**, but the shipped sample config (and the §2.5 recommendation) ship it
-  **off** — set `"log": { "enabled": false }` unless you really want log tailing to cross the site link.
+- **`log` is on by the code default**, but the bundled sample config sets it **off** — set
+  `"log": { "enabled": false }` unless you really want log tailing to cross the site link.
 - The six consumer classes (`state`, `cfg`, `evt`, `metric`, `data`) are on by default.
 - `cmd` is not on this list — it is never uplinked and has no policy knob.
 
@@ -195,11 +195,10 @@ Deployment between the on-prem device bus and the in-cluster broker. See
 `deploy/site-broker/k8s/boundary-bridge.example.yaml` for a worked manifest, and `deploy/site-broker/k8s/`
 for the in-cluster aggregation broker it bridges onto.
 
-**Greengrass:** the **site broker's** Greengrass recipe is in `deploy/site-broker/greengrass/`. The *bridge's*
-own Greengrass packaging (`recipe.yaml`, `gdk-config.json`) is a **stub** — and the intended
-PRIMARY=Nucleus-IPC variant is a documented follow-up, so a production Greengrass IPC-primary bridge is not
-yet buildable from this repo. Until then, a Greengrass core can run the bridge in its HOST shape against a
-device-local MQTT broker.
+**Greengrass:** the **site broker's** Greengrass recipe is in `deploy/site-broker/greengrass/`. On a
+Greengrass core the bridge runs in its HOST shape against a device-local MQTT broker; a Nucleus-IPC-primary
+device bus is not supported. The bridge's own Greengrass packaging (`recipe.yaml`, `gdk-config.json`) targets
+that HOST shape.
 
 ---
 
@@ -211,7 +210,7 @@ The bridge-level proof against two **real** brokers — one command, needs only 
 bash tests/e2e/run.sh
 ```
 
-It boots a throwaway two-EMQX rig on dedicated ports, runs the real bridge binary against the shipped sample
+It boots a throwaway two-EMQX rig on dedicated ports, runs the real bridge binary against the bundled sample
 config, and asserts (with per-assertion PASS/FAIL): uplink of a `state` envelope, an `evt` envelope, and a
 **raw** `data` payload arrive topic-verbatim (envelopes hop-tagged, raw byte-verbatim); downlink of an
 own-device `cmd`; the drop of a foreign-device `cmd`; a reply round-trip; the loop-drop of an own-echo; and
@@ -223,7 +222,7 @@ the bridge's own heartbeat `state` + relay-counter `metric`s appearing and ridin
 ## Observe the bridge's health and throughput
 
 - **Metrics** — every 30 s the bridge publishes relay counters as `metric`s on
-  `ecv1/{device}/uns-bridge/main/metric/<name>` (with the shipped `metricEmission.target: messaging`).
+  `ecv1/{device}/uns-bridge/main/metric/<name>` (with the sample's `metricEmission.target: messaging`).
   Watch `relay_uplinked` / `relay_downlinked` for throughput, `relay_dropped_*` for policy drops,
   `relay_loop_dropped` for loop protection firing, `relay_reply_relayed` / `relay_reply_expired` for the
   reply proxy, `relay_evt_buffered` / `relay_evt_replayed` for disconnect handling, and the gauges

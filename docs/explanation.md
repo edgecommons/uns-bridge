@@ -53,12 +53,9 @@ flowchart LR
 byte-verbatim, with *no* reserved-class publish guard — because it forwards messages other components
 authored (including publishes to reserved classes like `state`/`metric`). The `GgCommons` runtime
 deliberately keeps its raw `MessagingProvider` private (its `MessagingService` always enforces the
-reserved-class guard), so the relay cannot borrow the runtime's connection without a ggcommons change this
-slice deliberately does not make. The cost is one extra local TCP client on the device broker — trivial on
-HOST — and the two clients must not share an MQTT id (a shared id makes the broker evict them in a
-session-takeover loop), hence the `-relay` suffix. A future Rust-only library affordance could expose the
-runtime's raw provider and collapse this to two connections; that matters mainly under the Greengrass
-shared-connection quota.
+reserved-class guard), so the relay cannot borrow the runtime's connection. The cost is one extra local TCP
+client on the device broker — trivial on HOST — and the two clients must not share an MQTT id (a shared id
+makes the broker evict them in a session-takeover loop), hence the `-relay` suffix.
 
 The elegant consequence: because the bridge's own `state`/`cfg`/`metric` traffic goes out on the
 OBSERVABILITY connection and *matches the relay's own uplink filters*, the bridge is relayed to the site
@@ -81,7 +78,7 @@ flowchart LR
 
 - **Uplink (device → site)** relays the **six consumer classes** — `state`, `cfg`, `evt`, `metric`, `data`,
   `log` — the same six wildcards a fleet consumer subscribes. A seventh class, `app`, is **opt-in** (default
-  off; off also means its filter is never even subscribed). `cmd` is **never** uplinked in v1 — there is no
+  off; off also means its filter is never even subscribed). `cmd` is **never** uplinked — there is no
   cross-device request/reply, so the only requests crossing the bridge originate on the site side.
 - **Downlink (site → device)** relays `cmd` **only**, and only for **this bridge's own device** — the
   downlink filter is pinned to `ecv1/{device}/+/+/cmd/#`. A bridge must pull down only commands addressed to
@@ -169,16 +166,13 @@ Because the UNS is not retained (no MQTT retained messages), a consumer that con
 announced its `state`/`cfg` would otherwise see nothing until the next natural re-announce. On the
 **rising edge** of a site reconnect, the bridge publishes two notification-style broadcasts on the **device
 bus** — `ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg` — *before* it replays the
-`evt` buffer. The `_bcast` pseudo-component rides the `+` component position of the downlink filter, and the
-intent is that every device component re-announces its `state` keepalive and effective `cfg`, which then ride
-the uplink so the site view rehydrates without retain.
+`evt` buffer. The `_bcast` pseudo-component rides the `+` component position of the downlink filter, so every
+device component re-announces its `state` keepalive and effective `cfg`, which then ride the uplink so the
+site view rehydrates without retain.
 
-Current state: the bridge *publishes* these broadcasts, and a component *answers* them via the device-side
-`republish-*` listener. That listener is a **ggcommons library capability** — the four-language
-`RepublishListener`, which **shipped** in the UNS release (v0.2.0) and is **on by default** (library-owned
-plumbing, started automatically by the runtime; no component wiring). So every component rev-bumped to
-ggcommons v0.2.0+ answers automatically and the reconnect rehydration is real rather than inert; only
-pre-rev-bump components stay silent (harmless). See the repo `README.md` "Release state & remaining follow-ups."
+Each device component answers by re-announcing its state keepalive and effective cfg. Answering is built into
+the ggcommons library (the four-language device-side `RepublishListener`), on by default — components need no
+wiring. A reconnecting bridge's rehydration completes automatically, without relying on broker retain.
 
 ## The bridge's own observability
 
@@ -190,7 +184,7 @@ All of it matches the uplink filters and is relayed by the bridge itself. Counte
 current values. See [reference/messaging-interface.md](reference/messaging-interface.md#metrics) for the full
 table.
 
-One more startup check falls out of the LWT: the **D-B11 cross-check**. The site LWT should fire on the
+One more startup check falls out of the LWT: the **LWT cross-check**. The site LWT should fire on the
 bridge's *real* state topic so a UNREACHABLE lands where consumers actually listen. At startup the bridge
 template-resolves the configured `lwt.topic` and compares it to `gg.uns().topic(State)` (what the keepalive
 actually publishes on). A mismatch — the classic typo'd or unresolved device token — logs a **WARN**; a
@@ -199,7 +193,7 @@ config stays authoritative and the configured value is still what gets registere
 
 ## Platforms: where a bridge runs
 
-- **HOST** — the shipped target. Device bus and site bus are both MQTT brokers; the bridge is a plain binary
+- **HOST** — the primary target. Device bus and site bus are both MQTT brokers; the bridge is a plain binary
   (`--platform HOST`, `--transport MQTT` synthesized internally). This is what the tutorial and the e2e test
   exercise.
 - **KUBERNETES** — the *same binary* deployed as a **boundary bridge** between an on-prem device bus and an
@@ -207,13 +201,11 @@ config stays authoritative and the configured value is still what gets registere
   device bus (two would double-deliver everything; the hop tag prevents loops, not duplicates). Note the
   asymmetry: there is **no** bridge *inside* a cluster — the in-cluster broker is itself the aggregation
   point; a bridge only appears at a boundary.
-- **GREENGRASS** — the intended on-device model is **PRIMARY = Nucleus IPC** (the device bus) with the SITE
-  half still MQTT. This variant is **designed but not yet built**: the shipped binary hard-`compile_error!`s
-  unless the default `standalone` feature is on, and the packaging `recipe.yaml` is a stub that currently
-  assumes a device-local MQTT broker as the primary (HOST-style config via `GG_CONFIG`), not IPC. Treat the
-  Greengrass IPC-primary bridge as roadmap until that follow-up lands. (The **site broker's** own Greengrass
-  deployment recipe *does* exist — under `deploy/site-broker/greengrass/` — but that runs the *broker*, not
-  a bridge inside a core.)
+- **GREENGRASS** — on a Greengrass core the bridge runs in its **HOST/MQTT** shape against a device-local
+  MQTT broker: it requires the default `standalone` feature, and the packaging `recipe.yaml` targets that
+  shape (HOST-style config via `GG_CONFIG`). A **PRIMARY = Nucleus IPC** device bus (with the site half over
+  MQTT) is not supported. (The **site broker's** own Greengrass deployment recipe exists under
+  `deploy/site-broker/greengrass/` — but that runs the *broker*, not a bridge inside a core.)
 
 ## A note on security
 
@@ -229,7 +221,7 @@ broker as the bridge's paired half.
 ## What the bridge deliberately does *not* do
 
 - It does not transform payloads, re-key topics, or filter by content — it is a relay, not an ETL step.
-- It does not uplink `cmd` or support cross-device request/reply (v1).
+- It does not uplink `cmd` or support cross-device request/reply.
 - It does not make the live path durable — that is the streaming subsystem.
-- It does not run inside a Kubernetes cluster or (yet) over Greengrass IPC as the primary.
+- It does not run inside a Kubernetes cluster, and it does not run over Greengrass IPC as the primary device bus.
 - It does not enforce the site security boundary in code — the site broker's ACL/mTLS does.

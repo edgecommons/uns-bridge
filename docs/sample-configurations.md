@@ -40,7 +40,7 @@ UNREACHABLE will land where nobody listens.
 ## 1. Minimal local / dev (two MQTT brokers)
 
 The smallest config that relays one device bus onto a second broker standing in for the site bus. This is the
-shipped [`test-configs/config.json`](../test-configs/config.json) shape — device broker `:1883`, site broker
+bundled [`test-configs/config.json`](../test-configs/config.json) shape — device broker `:1883`, site broker
 `:1884`.
 
 Bring up two brokers and run it:
@@ -354,17 +354,15 @@ The config's `messaging.local` points at the **on-prem device broker** (reachabl
 
 ---
 
-## 7. Greengrass (status: designed, not yet built)
+## 7. Greengrass
 
-The intended on-device Greengrass model is **PRIMARY = Nucleus IPC** (device bus) + **SITE = MQTT**. That
-variant is **not yet implemented**: the shipped binary hard-errors unless the default `standalone` feature is
-built, and the bridge's `recipe.yaml`/`gdk-config.json` are packaging stubs (the stub recipe currently assumes
-a device-local MQTT broker as the primary, i.e. the HOST shape, via `GG_CONFIG`). So today a Greengrass core can
-only run the bridge in its HOST/MQTT shape against a local broker.
+On a Greengrass core the bridge runs in its **HOST/MQTT** shape: the device bus is a device-local MQTT broker
+and the site half is MQTT. The bridge requires the default `standalone` feature; a Nucleus-IPC-primary device
+bus is not supported. The `recipe.yaml`/`gdk-config.json` package it for a Greengrass core against that
+device-local broker (`GG_CONFIG`).
 
-For reference, the stub recipe's default config resolves `{ThingName}`/`{ComponentFullName}` templates in the
-site entry (an example of where template substitution is intended to reach once the full facade integration
-lands):
+The recipe's default config uses `{ThingName}`/`{ComponentFullName}` templates in the site entry, resolved
+Greengrass-side at deployment:
 
 ```yaml
 component:
@@ -381,22 +379,22 @@ component:
       lwt: { topic: "ecv1/{ThingName}/uns-bridge/main/state", payload: { status: "UNREACHABLE" }, qos: 1 }
 ```
 
-> Today the bridge only template-resolves the site **`lwt.topic`**; the `siteBroker`/`credentials` templates
-> above are honored by the *recipe's* GG-side substitution, not by the bridge's own config layer yet.
+> The bridge's own config layer template-resolves only the site **`lwt.topic`**; the `siteBroker`/`credentials`
+> templates above are resolved by the recipe's Greengrass-side substitution.
 
-The **site broker's** own Greengrass deployment (running the broker via
-`aws.greengrass.DockerApplicationManager`) *does* exist — see `deploy/site-broker/greengrass/`. That runs the
-broker the bridge connects to, not a bridge inside a core.
+The **site broker** also has its own Greengrass deployment (running the broker via
+`aws.greengrass.DockerApplicationManager`) — see `deploy/site-broker/greengrass/`. That runs the broker the
+bridge connects to, not a bridge inside a core.
 
 ---
 
 ## Deployment quick-reference
 
-| Platform | Status | Device bus | Site bus | Notes |
-|----------|--------|-----------|----------|-------|
-| **HOST** | shipped | local MQTT | MQTT (TLS in prod) | the default; `uns-bridge --config … --thing …` |
-| **KUBERNETES** (boundary) | shipped | on-prem MQTT | in-cluster MQTT | `replicas:1` + `Recreate`; no bridge *inside* the cluster |
-| **GREENGRASS** (IPC primary) | **designed, not built** | Nucleus IPC (planned) | MQTT | today only the HOST/MQTT shape runs on a core; `recipe.yaml` is a stub |
+| Platform | Device bus | Site bus | Notes |
+|----------|-----------|----------|-------|
+| **HOST** | local MQTT | MQTT (TLS in prod) | the default; `uns-bridge --config … --thing …` |
+| **KUBERNETES** (boundary) | on-prem MQTT | in-cluster MQTT | `replicas:1` + `Recreate`; no bridge *inside* the cluster |
+| **GREENGRASS** | device-local MQTT | MQTT | runs in the HOST/MQTT shape on a core; a Nucleus-IPC-primary device bus is not supported |
 
 Pair every bridge with an **ACL-enforcing site broker** (`deploy/site-broker/`) — that ACL, not any code in the
 bridge, is the security boundary.

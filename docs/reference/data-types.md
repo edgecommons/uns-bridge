@@ -24,7 +24,7 @@ The consequence for loop protection: raw messages cannot carry the hop tag, so t
 
 ## The GGCommons envelope
 
-The standard ggcommons envelope since the UNS change: `{ header, identity, tags, body }`. The bridge only ever
+The standard ggcommons envelope: `{ header, identity, tags, body }`. The bridge only ever
 reads/writes `header` (for replies) and `tags` (for the hop tag); `identity` and `body` travel untouched.
 
 ```jsonc
@@ -46,7 +46,7 @@ reads/writes `header` (for replies) and `tags` (for the hop tag); `identity` and
 ```
 
 The bridge never invents an `identity` or `body`, never re-orders members meaningfully (serde member order is
-deterministic; structural equality is what's guaranteed, D-U22), and touches exactly the two things below.
+deterministic; structural equality is what's guaranteed), and touches exactly the two things below.
 
 ## The `_relay` hop tag
 
@@ -120,9 +120,9 @@ On a site-reconnect rising edge the bridge publishes two notification-style `cmd
 { "header": { "name": "republish-state", "version": "1.0" }, "body": {} }
 ```
 
-They carry **no** `identity`, **no** `tags`, and **no** `reply_to` — fire-and-forget. The four-language
-device-side `RepublishListener` that answers them **shipped** in ggcommons v0.2.0 (on by default), so any
-component rev-bumped to that release answers automatically; only pre-rev-bump components stay silent. See
+They carry **no** `identity`, **no** `tags`, and **no** `reply_to` — fire-and-forget. Each device component
+answers by re-announcing its state keepalive and effective cfg. Answering is built into the ggcommons library
+(the four-language device-side `RepublishListener`), on by default — components need no wiring. See
 [explanation → reconnect rehydration](../explanation.md#reconnect-rehydration).
 
 ## The LWT payload

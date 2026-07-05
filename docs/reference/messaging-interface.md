@@ -15,8 +15,7 @@ ecv1[/{site}]/{device}/{component}/{instance}/{class}[/{channel…}]
 
 - `ecv1` — the fixed UNS root literal.
 - `{site}` — present **only** under the rooted grammar (`topic.includeRoot: true` **and** a multi-level
-  hierarchy). The bridge relays the **rootless** grammar (`topic.includeRoot: false`, the default); a rooted
-  site broker is a deferred enterprise-tier variant.
+  hierarchy). The bridge relays the **rootless** grammar (`topic.includeRoot: false`, the default).
 - `{device}` — the resolved Thing name (the last `hierarchy` level).
 - `{component}` — the component short name (the bridge's own is `uns-bridge`; the reserved broadcast
   pseudo-component is `_bcast`).
@@ -61,7 +60,7 @@ Notes:
   `state`/`cfg` filters look different from the rest.
 - The downlink filter's `+` in the component position also matches the reserved **`_bcast`** pseudo-component,
   so `ecv1/{device}/_bcast/main/cmd/republish-*` is relayed like any other own-device `cmd`.
-- **`cmd` is never uplinked** (no cross-device request/reply in v1). The uplink set ∩ downlink set = ∅ — that
+- **`cmd` is never uplinked** (no cross-device request/reply). The uplink set ∩ downlink set = ∅ — that
   disjointness is the structural loop guard for raw messages.
 - Even though the filters already constrain arrivals, the engine **re-checks** class + device on every message
   (defense against a misconfigured broker ACL); a message that fails re-check is dropped and counted
@@ -85,7 +84,7 @@ OBSERVABILITY connection), which then rides its own uplink to the site:
 | `ecv1/{device}/uns-bridge/main/state` | `state` | ~5 s (heartbeat) | The bridge's liveness keepalive. The **site LWT** publishes `UNREACHABLE` here on abrupt death. |
 | `ecv1/{device}/uns-bridge/main/cfg` | `cfg` | on start / change | The bridge's effective (redacted) config. |
 | `ecv1/{device}/uns-bridge/main/metric/<name>` | `metric` | 30 s | The relay counters/gauges (below). |
-| `ecv1/{device}/_bcast/main/cmd/republish-state` · `…/republish-cfg` | `cmd` | site-reconnect rising edge | The rehydration broadcasts, on the **device bus** only (best-effort; currently answered only if components run the `RepublishListener`). |
+| `ecv1/{device}/_bcast/main/cmd/republish-state` · `…/republish-cfg` | `cmd` | site-reconnect rising edge | The rehydration broadcasts, on the **device bus** only (best-effort; device components answer via the library's `RepublishListener`). |
 | `ggcommons/reply-<uuid>` | (non-UNS) | per proxied request | A bridge-minted reply topic on the **device bus**, subscribed for one reply (see below). |
 
 ## Request/reply proxying
@@ -166,7 +165,7 @@ ACL-enforcing site broker.
 
 ## CLI
 
-The bridge's minimal CLI (the full standard ggcommons contract is a documented follow-up):
+The bridge's minimal CLI:
 
 | Flag | Values | Notes |
 |------|--------|-------|

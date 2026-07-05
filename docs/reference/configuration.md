@@ -12,9 +12,8 @@ the standard `-c FILE` config (and its top-level `messaging` section doubles as 
 payload — the **device** bus), and the bridge reads its own `component.instances[]` from it (the **site**
 broker). The file is validated against the canonical ggcommons config schema at startup.
 
-The bridge's CLI is deliberately minimal today — `--config <file>` and `--thing <name>` — and synthesizes the
-standard ggcommons argv (`--platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`) internally. The
-full standard `-c`/`--platform`/`--transport` contract is a documented follow-up.
+The bridge's CLI is minimal — `--config <file>` and `--thing <name>` — and synthesizes the standard ggcommons
+argv (`--platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`) internally.
 
 ## Top-level sections
 
@@ -25,9 +24,9 @@ full standard `-c`/`--platform`/`--transport` contract is a documented follow-up
 | `hierarchy` | optional | UNS enterprise-hierarchy level names; the last level is the device. Absent ⇒ `["device"]`. |
 | `identity` | optional | Values for every hierarchy level except the last (the resolved thing name). Together with `hierarchy` these set the bridge's own `identity` and its real `state` topic (which the LWT cross-check compares against). |
 | `heartbeat` | optional | The bridge's own `state` keepalive (`{enabled, intervalSecs}`; on by default, 5 s). |
-| `metricEmission` | optional | Routes the relay counters (`target: messaging` publishes them on the UNS `metric` class — the shipped setting). |
+| `metricEmission` | optional | Routes the relay counters (`target: messaging` publishes them on the UNS `metric` class — the sample setting). |
 | `logging` | optional | Standard ggcommons logging (console `info` by default). |
-| `topic` | optional | `includeRoot` (default `false`); insert the site level after `ecv1` on a multi-site broker (D-U25: effective only for a multi-level hierarchy). |
+| `topic` | optional | `includeRoot` (default `false`); insert the site level after `ecv1` on a multi-site broker (effective only for a multi-level hierarchy). |
 
 The top level tolerates other standard ggcommons sections (`tags`, etc.); unknown sections in the bridge's
 own parse are ignored (forward compatibility).
@@ -82,7 +81,7 @@ The library `mqttBroker` shape (identical to any ggcommons broker config).
 | `payload` | object/string | — | The will payload — conventionally `{ "status": "UNREACHABLE" }`. |
 | `qos` | number | `0`* | Publish QoS for the will (the sample uses `1`). |
 
-*The library applies its own QoS default when omitted; the shipped sample sets `qos: 1`.
+*The library applies its own QoS default when omitted; the bundled sample sets `qos: 1`.
 
 ### `uplink` — per-class policy
 
@@ -156,7 +155,7 @@ still what gets registered). Set your `lwt.topic` to match.
 
 ## Complete example
 
-The shipped [`test-configs/config.json`](../../test-configs/config.json) — device broker `:1883`, site broker
+The bundled [`test-configs/config.json`](../../test-configs/config.json) — device broker `:1883`, site broker
 `:1884` (the dual-EMQX dev layout):
 
 ```jsonc
@@ -196,12 +195,10 @@ The shipped [`test-configs/config.json`](../../test-configs/config.json) — dev
 }
 ```
 
-## Accepted but not (yet) implemented
+## Current limits
 
-- **Greengrass PRIMARY = Nucleus IPC** — designed, not built. The shipped binary requires the default
-  `standalone` feature (`compile_error!` otherwise), and `recipe.yaml`/`gdk-config.json` are packaging stubs.
-- **Full `-c`/`--platform`/`--transport` CLI** — today the minimal `--config`/`--thing` CLI synthesizes the
-  standard argv (HOST/MQTT) internally.
-- **Template substitution across the whole `instances[]` entry** — only the site `lwt.topic` is
-  template-resolved (`{ThingName}`); other `instances[]` values stay literal until the full facade
-  integration.
+- **Greengrass PRIMARY = Nucleus IPC is not supported.** The binary requires the default `standalone`
+  feature; on a Greengrass core it runs in its HOST shape against a device-local MQTT broker.
+- **The CLI is `--config`/`--thing` only** — it synthesizes the standard HOST/MQTT ggcommons argv internally.
+- **Template substitution reaches only the site `lwt.topic`** (`{ThingName}`); other `instances[]` values are
+  taken literally.

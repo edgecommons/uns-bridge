@@ -47,10 +47,10 @@ pairs with, and write the site-side clients that consume device traffic or comma
 They do not cover modifying the bridge's own source (for that, the module-level rustdoc in `src/*.rs` and
 `docs/platform/DESIGN-uns-bridge.md` in the ggcommons monorepo are the reference).
 
-## Status at a glance
+## Platforms at a glance
 
-- The shipped binary targets the **HOST** MQTT↔MQTT pair (a device broker and a site broker) and the
-  **KUBERNETES** boundary-bridge deployment of that same binary. Both are the same code.
-- The **Greengrass IPC-primary** variant (device side over Nucleus IPC, site side over MQTT) is
-  **designed but not yet built** — see [Explanation → Platforms](explanation.md#platforms-where-a-bridge-runs)
-  and the repo `README.md` roadmap. Where these docs describe it, they say so explicitly.
+- The binary runs on **HOST** as an MQTT↔MQTT pair (a device broker and a site broker) and on
+  **KUBERNETES** as a boundary-bridge deployment of that same binary. Both are the same code.
+- On **Greengrass**, the bridge runs in its HOST/MQTT shape against a device-local MQTT broker; a
+  Nucleus-IPC-primary device bus (with the site half over MQTT) is not supported. See
+  [Explanation → Platforms](explanation.md#platforms-where-a-bridge-runs).
