@@ -20,7 +20,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
-use edgecommons::messaging::config::{BrokerConfig, Messaging, MessagingConfig, QosConfig};
+use edgecommons::messaging::config::{BrokerConfig, Messaging, MessagingConfig};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -108,7 +108,6 @@ impl InstanceEntry {
             messaging: Messaging {
                 local: broker,
                 northbound: None,
-                qos: QosConfig::default(),
             },
         })
     }
