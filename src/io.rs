@@ -31,7 +31,7 @@
 //! rehydration broadcasts `ecv1/{device}/_bcast/main/cmd/republish-{state,cfg}`
 //! on the DEVICE bus — best-effort, before the `evt` replay — so the site view
 //! rehydrates `state`/`cfg` without retain. **Bridge side only**: the device-side
-//! listener that answers the broadcast is a separate 4-language ggcommons library
+//! listener that answers the broadcast is a separate 4-language edgecommons library
 //! slice; until it lands the broadcast is inert (published, answered by nobody).
 //!
 //! With an [`ObservabilityHook`] (P3-4b, §2.8) a periodic task additionally
@@ -45,9 +45,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use ggcommons::config::model::Config;
-use ggcommons::messaging::{Destination, MessageBuilder, MessagingProvider, Qos, Subscription};
-use ggcommons::metrics::{MetricBuilder, MetricService};
+use edgecommons::config::model::Config;
+use edgecommons::messaging::{Destination, MessageBuilder, MessagingProvider, Qos, Subscription};
+use edgecommons::metrics::{MetricBuilder, MetricService};
 use tokio::task::JoinHandle;
 
 use crate::config::{QueueConfig, ReplyConfig, UplinkConfig};
@@ -55,7 +55,7 @@ use crate::observability::{relay_metric_groups, metric_definitions, RelaySnapsho
 use crate::policy::{class_index, EvtPush, UplinkPolicy, UplinkVerdict, POLICY_CLASSES};
 use crate::relay::{Direction, DropReason, RelayDecision, RelayEngine, REHYDRATION_CMDS};
 use crate::reply::{prepare_reply, DownlinkRewrite, ReplyCorrelator, ReplyRelay};
-use ggcommons::uns::UnsClass;
+use edgecommons::uns::UnsClass;
 
 /// Cadence of the connectivity watcher that replays buffered `evt` once the
 /// site link is (back) up (§2.5 / D-B10 reconnect replay).
@@ -510,7 +510,7 @@ impl RelayIo {
         reply: &ReplyConfig,
         uplink: &UplinkConfig,
         observability: Option<ObservabilityHook>,
-    ) -> ggcommons::Result<RelayIo> {
+    ) -> edgecommons::Result<RelayIo> {
         let counters = Arc::new(RelayCounters::default());
         let reply_proxy = Arc::new(ReplyProxy {
             correlator: Mutex::new(ReplyCorrelator::new(reply.ttl(), reply.max_pending)),
@@ -589,7 +589,7 @@ impl RelayIo {
         // (§2.5: "on each site-connection RE-establishment").
         //
         // BRIDGE SIDE ONLY: the device-side `republish-*` listener that answers
-        // the broadcast is a separate 4-language ggcommons library slice —
+        // the broadcast is a separate 4-language edgecommons library slice —
         // until it lands the broadcast is inert (see README "Reconnect
         // rehydration").
         {
@@ -814,7 +814,7 @@ mod tests {
     use super::*;
     use crate::relay::{DEFAULT_MAX_HOPS, RELAY_TAG};
     use async_trait::async_trait;
-    use ggcommons::messaging::topic_matches;
+    use edgecommons::messaging::topic_matches;
     use serde_json::{json, Value};
     use std::sync::Mutex;
     use std::time::Duration;
@@ -868,9 +868,9 @@ mod tests {
             payload: Vec<u8>,
             _dest: Destination,
             _qos: Qos,
-        ) -> ggcommons::Result<()> {
+        ) -> edgecommons::Result<()> {
             if self.fail_publish.load(Ordering::SeqCst) {
-                return Err(ggcommons::GgError::Messaging(format!(
+                return Err(edgecommons::EdgeCommonsError::Messaging(format!(
                     "forced publish failure for {topic}"
                 )));
             }
@@ -890,10 +890,10 @@ mod tests {
             _dest: Destination,
             _qos: Qos,
             max_messages: usize,
-        ) -> ggcommons::Result<Subscription> {
+        ) -> edgecommons::Result<Subscription> {
             if let Some(prefix) = self.fail_subscribe_prefix.lock().unwrap().as_deref() {
                 if filter.starts_with(prefix) {
-                    return Err(ggcommons::GgError::Messaging(format!(
+                    return Err(edgecommons::EdgeCommonsError::Messaging(format!(
                         "forced subscribe failure for {filter}"
                     )));
                 }
@@ -903,7 +903,7 @@ mod tests {
             Ok(Subscription::new(rx, Box::new(())))
         }
 
-        async fn unsubscribe(&self, filter: &str, _dest: Destination) -> ggcommons::Result<()> {
+        async fn unsubscribe(&self, filter: &str, _dest: Destination) -> edgecommons::Result<()> {
             self.unsubscribed.lock().unwrap().push(filter.to_string());
             self.subs.lock().unwrap().retain(|(f, _)| f != filter);
             Ok(())
@@ -1107,8 +1107,8 @@ mod tests {
     // ---- the §2.4 reply proxy (P3-3) ----
 
     const CMD_TOPIC: &str = "ecv1/gw-01/opcua-adapter/main/cmd/reload-config";
-    const SITE_REPLY: &str = "ggcommons/reply-site-original";
-    const BRIDGE_PREFIX: &str = "ggcommons/reply-";
+    const SITE_REPLY: &str = "edgecommons/reply-site-original";
+    const BRIDGE_PREFIX: &str = "edgecommons/reply-";
 
     fn cmd_with_reply(reply_to: &str, corr: &str) -> Vec<u8> {
         MessageBuilder::new("reload-config", "1.0")
@@ -1263,13 +1263,13 @@ mod tests {
     #[tokio::test]
     async fn max_pending_overflow_evicts_the_oldest_entry() {
         let (io, device, site) = started_with(ReplyConfig { ttl_secs: 60, max_pending: 2 }).await;
-        let bridge0 = downlink_request(&device, &site, "ggcommons/reply-site-0", "c0").await;
-        let bridge1 = downlink_request(&device, &site, "ggcommons/reply-site-1", "c1").await;
+        let bridge0 = downlink_request(&device, &site, "edgecommons/reply-site-0", "c0").await;
+        let bridge1 = downlink_request(&device, &site, "edgecommons/reply-site-1", "c1").await;
         assert_eq!(io.pending_replies(), 2);
 
         // The third request overflows the map: the OLDEST entry (bridge0) is
         // evicted — expired early, unsubscribed, counted.
-        let _bridge2 = downlink_request(&device, &site, "ggcommons/reply-site-2", "c2").await;
+        let _bridge2 = downlink_request(&device, &site, "edgecommons/reply-site-2", "c2").await;
         assert!(
             wait_until(|| io.counters().reply_expired.load(Ordering::Relaxed) == 1).await,
             "eviction must count as reply_expired"
@@ -1290,7 +1290,7 @@ mod tests {
             .unwrap();
         device.publish(&bridge1, reply, Destination::Local, Qos::AtLeastOnce).await.unwrap();
         assert!(
-            wait_until(|| site.published().iter().any(|(t, _)| t == "ggcommons/reply-site-1")).await,
+            wait_until(|| site.published().iter().any(|(t, _)| t == "edgecommons/reply-site-1")).await,
             "a surviving entry must still relay its reply"
         );
         io.shutdown().await;
@@ -1320,7 +1320,7 @@ mod tests {
         let (io, _device, site) = started().await;
         // The stray window: a reply delivered just before expiry/eviction tore
         // the entry down — drive the resolution path directly with no entry.
-        io.reply_proxy.handle_reply("ggcommons/reply-never-recorded", &envelope()).await;
+        io.reply_proxy.handle_reply("edgecommons/reply-never-recorded", &envelope()).await;
         assert_eq!(io.counters().reply_stray.load(Ordering::Relaxed), 1);
         assert!(site.published().is_empty(), "a stray reply must not reach the site broker");
         assert_eq!(io.counters().reply_relayed.load(Ordering::Relaxed), 0);

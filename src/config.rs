@@ -23,7 +23,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
-use ggcommons::messaging::config::{BrokerConfig, LwtConfig, Messaging, MessagingConfig};
+use edgecommons::messaging::config::{BrokerConfig, LwtConfig, Messaging, MessagingConfig};
 use serde::Deserialize;
 
 use crate::policy::DEFAULT_EVT_BUFFER_MAX;
@@ -42,7 +42,7 @@ pub const DEFAULT_QUEUE: usize = 64;
 /// `heartbeat`, … — are tolerated; the full facade integration is a follow-up).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BridgeConfig {
-    /// PRIMARY connection: the device-local bus. The standard ggcommons
+    /// PRIMARY connection: the device-local bus. The standard edgecommons
     /// `messaging` shape (doubles as the `--transport MQTT <file>` payload).
     pub messaging: Messaging,
     /// The component section carrying the site-broker instance entry.
@@ -52,7 +52,7 @@ pub struct BridgeConfig {
 /// The `component` config section. There is deliberately no `name` member: the
 /// canonical schema's `component` section allows only `global`/`instances`
 /// (`additionalProperties:false`) — the component's full name is supplied by the
-/// runtime builder (`GgCommonsBuilder::new`), never by config.
+/// runtime builder (`EdgeCommonsBuilder::new`), never by config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ComponentSection {
     /// Per-instance entries; the bridge's site broker lives in the entry with
@@ -272,7 +272,7 @@ impl BridgeConfig {
     /// section with `-relay` appended to every client id, and no LWT.
     ///
     /// Since P3-4b the bridge holds **two** device-bus connections (README
-    /// "Connections"): the GgCommons runtime builds the observability connection
+    /// "Connections"): the EdgeCommons runtime builds the observability connection
     /// from the config **file** (this same `messaging` section — it doubles as the
     /// `--transport MQTT` payload), and the relay holds this second raw one. The
     /// suffix keeps the two MQTT client ids distinct (a shared id makes the broker
@@ -424,7 +424,7 @@ mod tests {
         let mc = cfg.relay_primary_messaging();
         assert_eq!(mc.messaging.local.resolved_host().unwrap(), "localhost");
         assert_eq!(mc.messaging.local.port, 1883);
-        // The GgCommons runtime connects with the CONFIGURED id (from the file);
+        // The EdgeCommons runtime connects with the CONFIGURED id (from the file);
         // the relay's raw connection must never collide with it.
         assert_eq!(mc.messaging.local.client_id, "uns-bridge-local-relay");
         assert!(mc.messaging.iot_core.is_none());

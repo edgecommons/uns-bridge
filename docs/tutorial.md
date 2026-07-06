@@ -14,7 +14,7 @@ up both.
 - Rust (stable) and `cargo`.
 - Docker, for two throwaway EMQX brokers.
 - An MQTT CLI for poking the brokers by hand — `mosquitto_pub`/`mosquitto_sub`, or MQTTX.
-- This repo checked out, buildable against the sibling `ggcommons` library (the gitignored
+- This repo checked out, buildable against the sibling `edgecommons` library (the gitignored
   `.cargo/config.toml` `[patch]` override — see the repo `README.md`).
 
 ## 2. Start two brokers
@@ -36,7 +36,7 @@ bridges onto."
 cargo run -- --config ./test-configs/config.json --thing gw-01
 ```
 
-You should see it (in order): initialize the ggcommons runtime against the **device** bus, establish the
+You should see it (in order): initialize the edgecommons runtime against the **device** bus, establish the
 **relay's** own device-bus connection, run the **LWT cross-check**, connect to the **site** broker, subscribe
 its uplink filters, and log `relay running`. The device identity is `gw-01` (from `--thing`); the bundled
 config places it at `dallas/gw-01` via `hierarchy`/`identity`.
@@ -46,7 +46,7 @@ device traffic up to the site broker, and listening for commands to bring down.
 
 ## 4. Watch the bridge announce itself (uplink, the easy case)
 
-The bridge is a ggcommons component, so it emits its own heartbeat `state` keepalive — which *matches its
+The bridge is a edgecommons component, so it emits its own heartbeat `state` keepalive — which *matches its
 own uplink filter* and therefore rides its own relay to the site bus. Subscribe the whole UNS `state`
 class on the **site** broker (`:1884`):
 
@@ -103,19 +103,19 @@ device (which is also exactly what the site broker's per-device ACL allows it to
 
 This is the subtle one. A site-side requester sets `header.reply_to` to a topic **on the site broker**; a
 device-side responder would naively reply onto the *device* bus, where the requester isn't listening. The
-bridge proxies the whole path. With a ggcommons client this is one `request()` call across the bridge; by
+bridge proxies the whole path. With a edgecommons client this is one `request()` call across the bridge; by
 hand:
 
 ```bash
 # 1. site side: subscribe your own reply topic on the SITE bus
-mosquitto_sub -p 1884 -t 'ggcommons/reply-demo' -v
+mosquitto_sub -p 1884 -t 'edgecommons/reply-demo' -v
 # 2. site side: send a request naming that reply topic
 mosquitto_pub -p 1884 -t 'ecv1/gw-01/opcua-adapter/main/cmd/ping' \
-  -m '{"header":{"name":"ping","version":"1.0","reply_to":"ggcommons/reply-demo","correlation_id":"c1"},"body":{}}'
+  -m '{"header":{"name":"ping","version":"1.0","reply_to":"edgecommons/reply-demo","correlation_id":"c1"},"body":{}}'
 ```
 
 Watch your device-bus `cmd` subscriber (terminal A from step 6): the relayed command's `reply_to` is **not**
-`ggcommons/reply-demo` — the bridge rewrote it to a fresh `ggcommons/reply-...` topic it minted and subscribed
+`edgecommons/reply-demo` — the bridge rewrote it to a fresh `edgecommons/reply-...` topic it minted and subscribed
 **on the device bus**. Now play the responder: publish a reply on *that* bridge-minted topic, on the device
 bus, with the same `correlation_id`:
 
@@ -124,7 +124,7 @@ mosquitto_pub -p 1883 -t '<the-bridge-minted-reply-topic>' \
   -m '{"header":{"name":"ping-reply","version":"1.0","correlation_id":"c1"},"body":{"ok":true}}'
 ```
 
-Your `ggcommons/reply-demo` subscriber on the **site** bus receives it — `correlation_id` and body intact,
+Your `edgecommons/reply-demo` subscriber on the **site** bus receives it — `correlation_id` and body intact,
 `reply_to` stripped, hop tag appended. The bridge carried the reply back to the original site topic. That is
 the correlation map at work.
 

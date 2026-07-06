@@ -8,7 +8,7 @@
 # PRIMARY (device bus, from the bridge's point of view) = THIS cluster's own broker
 # (uns-bridge-site-broker, emqx.yaml) — the bridge treats it exactly like a HOST device-local
 # broker. SITE = the external, higher-tier broker outside the cluster. Mirrors
-# ggcommons/templates/rust/k8s/deployment.yaml's shape (Downward-API identity, CONFIGMAP source,
+# edgecommons/templates/rust/k8s/deployment.yaml's shape (Downward-API identity, CONFIGMAP source,
 # whole-volume mount for hot-reload) with the D-B15 duplication guard:
 # `replicas: 1` + `strategy: Recreate` (two boundary bridges on the same broker pair
 # double-deliver every message — hop tags stop LOOPS, not duplication, DESIGN-uns-bridge.md §2.3).
@@ -19,7 +19,7 @@
 # contract; today the bridge only has the minimal `--config <path> [--thing <name>]` CLI (see
 # ../../README.md "Also follow-ups"), which happens to work fine here (a mounted ConfigMap file
 # path is still just a file path) but does NOT get the CONFIGMAP source's hot-reload-on-..data-swap
-# behavior the way other ggcommons components do — a documented gap, not something this slice fixes.
+# behavior the way other edgecommons components do — a documented gap, not something this slice fixes.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -33,6 +33,7 @@ data:
       "heartbeat": { "enabled": true, "intervalSecs": 5 },
       "metricEmission": { "target": "messaging" },
       "component": {
+        "token": "uns-bridge",
         "instances": [
           {
             "id": "site",
@@ -81,16 +82,16 @@ spec:
         - name: uns-bridge
           image: REPLACE_ME   # ghcr.io/<owner>/uns-bridge:<tag> — no Dockerfile ships in this repo yet
           imagePullPolicy: IfNotPresent
-          args: ["--config", "/etc/ggcommons/config.json"]   # --thing omitted: falls through to GGCOMMONS_THING_NAME below (D-U1 identity chain)
+          args: ["--config", "/etc/edgecommons/config.json"]   # --thing omitted: falls through to EDGECOMMONS_THING_NAME below (D-U1 identity chain)
           env:
-            - name: GGCOMMONS_THING_NAME
+            - name: EDGECOMMONS_THING_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
           volumeMounts:
-            - { name: config, mountPath: /etc/ggcommons, readOnly: true }        # whole volume, never subPath (hot-reload)
+            - { name: config, mountPath: /etc/edgecommons, readOnly: true }        # whole volume, never subPath (hot-reload)
             - { name: site-tls, mountPath: /etc/uns-bridge/site-tls, readOnly: true }
       volumes:
         - name: config

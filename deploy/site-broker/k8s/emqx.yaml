@@ -1,12 +1,12 @@
 # In-cluster EMQX broker (DESIGN-uns-bridge.md §4.3): the aggregation point itself, native to the
 # cluster — every in-cluster component already shares this ONE broker (no bridge runs inside a
 # cluster; see README.md and boundary-bridge.example.yaml for the one exception, a boundary pod).
-# Structurally the same Deployment+Service shape as ggcommons/test-infra/k8s/emqx.yaml (the
+# Structurally the same Deployment+Service shape as edgecommons/test-infra/k8s/emqx.yaml (the
 # device-broker precedent for kind/k3s smokes): plaintext-only, anonymous, NO ACL.
 #
 # THIS IS DELIBERATELY DIFFERENT FROM docker-compose.yml/greengrass's "site" broker, and that
 # needs explaining: every in-cluster component here connects anonymously (no client cert), the same
-# way they already connect to the existing `ggcommons-emqx` k8s precedent — the cluster's own
+# way they already connect to the existing `edgecommons-emqx` k8s precedent — the cluster's own
 # NetworkPolicy/RBAC is the trust boundary for pure in-cluster traffic, not per-pod MQTT identity.
 # EMQX (open-source) evaluates ONE global authorization chain across every listener — it has no
 # per-listener ACL scoping — so mounting acl.conf here would apply `${username}`-keyed rules
@@ -43,7 +43,7 @@ spec:
             - { name: mqtt, containerPort: 1883 }
             - { name: dashboard, containerPort: 18083 }
           env:
-            - { name: EMQX_ALLOW_ANONYMOUS, value: "true" }   # matches ggcommons/test-infra/k8s/emqx.yaml
+            - { name: EMQX_ALLOW_ANONYMOUS, value: "true" }   # matches edgecommons/test-infra/k8s/emqx.yaml
           readinessProbe:
             tcpSocket: { port: 1883 }
             initialDelaySeconds: 5

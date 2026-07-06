@@ -4,7 +4,7 @@
 //! routing + own-device pinning) and the §2.3 hop-tag loop protection — with no IO,
 //! so the whole decision surface is unit-testable without a broker.
 //!
-//! (Section references are to `docs/platform/DESIGN-uns-bridge.md` in the ggcommons
+//! (Section references are to `docs/platform/DESIGN-uns-bridge.md` in the edgecommons
 //! monorepo.)
 //!
 //! ## Semantics
@@ -29,9 +29,9 @@
 //! evt replay buffer (P3-4, [`crate::policy`]) slot in the same way, downstream
 //! of every Forward decision on the uplink.
 
-use ggcommons::messaging::message::{HierEntry, Message, MessageIdentity, MessageTags};
-use ggcommons::uns::{Uns, UnsClass, UnsScope};
-use ggcommons::Result;
+use edgecommons::messaging::message::{HierEntry, Message, MessageIdentity, MessageTags};
+use edgecommons::uns::{Uns, UnsClass, UnsScope};
+use edgecommons::Result;
 use serde_json::Value;
 
 /// The reserved envelope-tag key carrying the relay hop list (§2.3). The `_` prefix
@@ -49,7 +49,7 @@ pub const COMPONENT_TOKEN: &str = "uns-bridge";
 /// The two §2.5 / DESIGN-uns §9.3 (layer 2) reconnect-rehydration broadcast
 /// command names, in publish order — published on the DEVICE bus at the site
 /// reconnect rising edge so the site view rehydrates `state`/`cfg` without
-/// retain. (The device-side listener is a separate 4-language ggcommons library
+/// retain. (The device-side listener is a separate 4-language edgecommons library
 /// slice; the broadcast is inert until it lands.)
 pub const REHYDRATION_CMDS: [&str; 2] = ["republish-state", "republish-cfg"];
 
@@ -128,7 +128,7 @@ impl RelayEngine {
     /// an invalid device token fails here rather than at subscribe time.
     ///
     /// # Errors
-    /// [`ggcommons::GgError::UnsValidation`] / `Messaging` when `device` is empty
+    /// [`edgecommons::EdgeCommonsError::UnsValidation`] / `Messaging` when `device` is empty
     /// or violates the UNS token rule.
     pub fn new(device: impl Into<String>, max_hops: usize, app_enabled: bool) -> Result<RelayEngine> {
         let device = device.into();
@@ -310,7 +310,7 @@ impl RelayEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ggcommons::messaging::MessageBuilder;
+    use edgecommons::messaging::MessageBuilder;
     use serde_json::json;
 
     const DEVICE: &str = "gw-01";
@@ -469,7 +469,7 @@ mod tests {
             "telemetry/gw-01/alarms",             // not ecv1
             "ecv1/gw-01/comp/main",               // too short (no class position)
             "ecv1/gw-01/comp/main/notaclass/x",   // unknown class token
-            "ggcommons/reply-abc123",             // reply topics never match (non-ecv1)
+            "edgecommons/reply-abc123",             // reply topics never match (non-ecv1)
         ] {
             assert_eq!(
                 e.decide(Direction::Uplink, topic, &envelope(&[])),

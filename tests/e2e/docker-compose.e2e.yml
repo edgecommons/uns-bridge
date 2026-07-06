@@ -1,13 +1,13 @@
 # P3-6 — the dual-EMQX rig for the bridge-level end-to-end test (tests/e2e/run.sh).
 #
-# Two plain EMQX brokers in the ggcommons test-infra style (plaintext, anonymous, NO ACL,
+# Two plain EMQX brokers in the edgecommons test-infra style (plaintext, anonymous, NO ACL,
 # NO TLS): this rig proves the RELAY (tests/e2e_dual_broker.rs assertions A-F), not the
 # security boundary — the ACL'd/mTLS site broker is deploy/site-broker/ (P3-5), where the
 # mounted acl.conf deliberately denies anonymous plaintext clients (see that README's
 # "Two ways to run this locally"). Reusing it here would silently drop every relay publish.
 #
 # DEDICATED PORTS (21883/21884, overridable below) so the rig never collides with the
-# standing dev infra on this machine: ggcommons-emqx (:1883/:8883/:18083) and the P3-5
+# standing dev infra on this machine: edgecommons-emqx (:1883/:8883/:18083) and the P3-5
 # site broker (:1884/:8884/:18084). Set E2E_DEVICE_PORT=1883 E2E_SITE_PORT=1884 for the
 # canonical dual-broker layout on a box where those ports are free.
 #

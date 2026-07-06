@@ -1,7 +1,7 @@
 # uns-bridge
 
 **One `uns-bridge` per device bus**: an envelope-aware relay between the device-local bus and the
-**site UNS broker**, making the logical [Unified Namespace](https://github.com/edgecommons/ggcommons)
+**site UNS broker**, making the logical [Unified Namespace](https://github.com/edgecommons/edgecommons)
 (`ecv1/{device}/{component}/{instance}/{class}[/channel]`) a real **site-wide** bus. Each device has
 its own bus (a local MQTT broker on HOST; the Nucleus IPC bus on GREENGRASS) with no cross-device
 visibility — the bridge subscribes the device's UNS traffic, republishes it **topic-verbatim** onto
@@ -15,24 +15,24 @@ rewrites `reply_to` so site→device request/reply crosses the bridge (the TTL'd
 site connection for fast whole-device reachability detection.
 
 Design source of truth: `docs/platform/DESIGN-uns-bridge.md` (and `DESIGN-uns.md` §9) in the
-ggcommons monorepo. Section references below (§…) point there.
+edgecommons monorepo. Section references below (§…) point there.
 
 ## How it connects (§1, §2.1, §2.8)
 
-Since P3-4b the bridge is a **proper ggcommons component**: a real `GgCommons` runtime (built from
+Since P3-4b the bridge is a **proper edgecommons component**: a real `EdgeCommons` runtime (built from
 the same config file) owns the bridge's own observability. The bridge therefore holds **three**
 connections:
 
 | Connection | What | Built from |
 |---|---|---|
-| **OBSERVABILITY** (device bus) | the `GgCommons` runtime: identity, the automatic heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` publisher, `gg.metrics()` (`metricEmission.target = "messaging"`), logging init, SIGTERM handling | the standard `messaging` config section — the config file doubles as the `--transport MQTT` payload |
+| **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime: identity, the automatic heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` publisher, `gg.metrics()` (`metricEmission.target = "messaging"`), logging init, SIGTERM handling | the standard `messaging` config section — the config file doubles as the `--transport MQTT` payload |
 | **RELAY PRIMARY** (device bus) | the raw byte relay (§1.3) + reply proxy + rehydration broadcast | the same `messaging` section with the client id suffixed **`-relay`** (two MQTT clients must not share an id) and any `lwt` stripped (the will belongs to the runtime connection) |
-| **SITE** | the site UNS broker — the bridge's **external system**; carries the D-B11 LWT | the bridge's own `component.instances[]` `"site"` entry, by **reusing the ggcommons core's public MQTT objects**: `MqttProvider::connect(&site_cfg)` — zero library change |
+| **SITE** | the site UNS broker — the bridge's **external system**; carries the D-B11 LWT | the bridge's own `component.instances[]` `"site"` entry, by **reusing the edgecommons core's public MQTT objects**: `MqttProvider::connect(&site_cfg)` — zero library change |
 
-Why two device-bus connections: `GgCommons` deliberately does **not** expose its raw
+Why two device-bus connections: `EdgeCommons` deliberately does **not** expose its raw
 `MessagingProvider` (`DefaultMessagingService` keeps it private), and the relay must stay at the
 raw provider level — byte-verbatim, no reserved-class guard (§1.3) — so sharing the runtime's
-connection would require a ggcommons change this slice deliberately does not make. The cost is one
+connection would require a edgecommons change this slice deliberately does not make. The cost is one
 extra local TCP client on the device broker (trivial on HOST/EMQX). *Follow-up (Rust-only library
 affordance)*: expose the runtime's raw provider (e.g. `DefaultMessagingService::provider()`) so
 the relay can share it — one client less, which matters under the GREENGRASS shared-connection
@@ -55,7 +55,7 @@ re-subscribes every filter on each CONNACK, so reconnection is transparent.
 | **Downlink** site → device | `cmd` only (broadcast rides the `+` component position → `_bcast`) | `ecv1/{device}/+/+/cmd/#` — **pinned to this bridge's own device** | same topic string, on the device bus |
 
 Explicit non-flows (v1): `cmd` is never uplinked (no cross-device request/reply, D-B7); reply
-topics (`ggcommons/reply-…`, non-`ecv1`) never match a UNS filter and only cross via the §2.4
+topics (`edgecommons/reply-…`, non-`ecv1`) never match a UNS filter and only cross via the §2.4
 correlation map (below). The uplink∩downlink class **disjointness** is also the structural loop
 guard for raw (non-enveloped) messages.
 
@@ -77,12 +77,12 @@ library/system-reserved.
 ### `reply_to` rewrite — the TTL'd correlation map (§2.4 / D-B9)
 
 Request/reply crossing the bridge breaks without rewriting: a site-side requester sets
-`header.reply_to = ggcommons/reply-<uuid>` — an ephemeral topic **on the site broker** — so a
+`header.reply_to = edgecommons/reply-<uuid>` — an ephemeral topic **on the site broker** — so a
 device-side responder would `reply()` onto the device bus where nobody listens. The bridge proxies
 the reply path:
 
 1. **Down**: a relayed `cmd` carrying `header.reply_to` gets a **bridge-minted** reply topic
-   (`ggcommons/reply-<uuid>`, the core's standard prefix) written into the header; the bridge
+   (`edgecommons/reply-<uuid>`, the core's standard prefix) written into the header; the bridge
    subscribes it on the device bus (**before** relaying the cmd; `max_messages = 1`,
    first-reply-wins) and records `bridge topic → original site reply topic` in the correlation
    map. A `cmd` **without** `reply_to` is a fire-and-forget notification and relays untouched.
@@ -124,7 +124,7 @@ decision:
   every component's re-announce can ride the uplink and the site view rehydrates `state`/`cfg`
   without retain. Startup is not an edge — the relay only starts after the site link is first
   established. The device-side listener that answers the broadcast — components re-publishing
-  their `state` keepalive and effective `cfg` on demand — **shipped in the ggcommons library**
+  their `state` keepalive and effective `cfg` on demand — **shipped in the edgecommons library**
   (`RepublishListener` in Java/Python/TS, `uns.rs` in Rust; on by default, jittered + coalesced),
   so a rev-bumped component fleet rehydrates the site view on every bridge reconnect. The
   broadcast is no longer inert.
@@ -193,7 +193,7 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
 }
 ```
 
-Notes for the current slice: the config file is validated against the **canonical ggcommons
+Notes for the current slice: the config file is validated against the **canonical edgecommons
 schema** at startup (the runtime loads it via `-c FILE`) — a shipped-config test pins that it
 passes. Template substitution (`{ThingName}` → the sanitized device token) is resolved for the
 **site `lwt.topic` only** (the load-bearing case, §1.2); templates elsewhere in the `instances[]`
@@ -205,11 +205,11 @@ D-B10) and the `reply` knobs (§2.4) are fully enforced; the counters publish as
 ## Run locally (HOST)
 
 ```bash
-# device broker on :1883 (the standard ggcommons test-infra EMQX) and a site broker on :1884
+# device broker on :1883 (the standard edgecommons test-infra EMQX) and a site broker on :1884
 cargo run -- --config ./test-configs/config.json --thing gw-01
 ```
 
-Device identity: `-t/--thing` or `GGCOMMONS_THING_NAME`. Logging is owned by the ggcommons
+Device identity: `-t/--thing` or `EDGECOMMONS_THING_NAME`. Logging is owned by the edgecommons
 runtime (the config's `logging` section; default console `info`). Graceful shutdown (Ctrl-C /
 SIGTERM, via the library's signal watcher) aborts the pumps and **unsubscribes every filter at
 both brokers** before exit. The bridge's own `state` keepalive / `cfg` announce / `metric`
@@ -234,7 +234,7 @@ bash tests/e2e/run.sh
 
 It boots a throwaway two-EMQX rig (`tests/e2e/docker-compose.e2e.yml`: a device broker and a site
 broker, plaintext/anonymous, **dedicated ports `:21883`/`:21884`** so it never collides with the
-standing `ggcommons-emqx` on `:1883` or the P3-5 site broker on `:1884` — override with
+standing `edgecommons-emqx` on `:1883` or the P3-5 site broker on `:1884` — override with
 `E2E_DEVICE_PORT`/`E2E_SITE_PORT`), then runs `tests/e2e_dual_broker.rs`, which spawns the **real
 bridge binary** against the shipped sample config (ports swapped in) and asserts, over live MQTT,
 per assertion with a printed PASS/FAIL:
@@ -259,13 +259,13 @@ down on exit either way; runtime ≈ 40 s (dominated by the 30 s first metric-em
 The security-boundary counterpart — the ACL'd/mTLS site broker denying cross-device publishes —
 is deliberately **not** this test: see `deploy/site-broker/` (P3-5).
 
-**Local development against the sibling library**: this repo pins `ggcommons` by git rev in
+**Local development against the sibling library**: this repo pins `edgecommons` by git rev in
 `Cargo.toml` (what CI resolves). For local dev, a **gitignored** `.cargo/config.toml` patches the
 dep to the sibling checkout — create it as:
 
 ```toml
-[patch."https://github.com/edgecommons/ggcommons.git"]
-ggcommons = { path = "../ggcommons/libs/rust" }
+[patch."https://github.com/edgecommons/edgecommons.git"]
+edgecommons = { path = "../core/libs/rust" }
 ```
 
 (The telemetry-processor pattern; delete the file for a pure git-rev build.)
@@ -291,7 +291,7 @@ The bridge and the site broker deploy **as a pair** — see
 | `src/observability.rs` | The **pure** §2.8 pieces: the counter→metric mapping (snapshot deltas → named measure groups) + the D-B11 LWT cross-check — no IO |
 | `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (rising-edge rehydration broadcast + evt replay) + the 30 s metric emission; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
 | `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; the relay's `-relay`-suffixed device connection; typed `reply` + `uplink` knobs |
-| `src/main.rs` | The GgCommons runtime (observability) + the relay's raw connections (device fatal, site retried), the D-B11 LWT cross-check, graceful stop |
+| `src/main.rs` | The EdgeCommons runtime (observability) + the relay's raw connections (device fatal, site retried), the D-B11 LWT cross-check, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `tests/e2e_dual_broker.rs`, `tests/e2e/` | The P3-6 **dual-EMQX end-to-end test** (real binary between two real brokers, assertions A–F above) + its rig (`run.sh`, `docker-compose.e2e.yml`) |
 | `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs for the **bridge itself** (finalized with the GREENGRASS/IPC variant follow-up) |
@@ -304,7 +304,7 @@ The bridge and the site broker deploy **as a pair** — see
 | **P3-2** | repo scaffold; relay engine (six uplink filters + pinned downlink, topic-verbatim, hop tag/maxHops); unit tests over trait fakes | **done** |
 | **P3-3** | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | **done** |
 | **P3-4** | per-class uplink policy: enables, token-bucket rate caps, D-B10 disconnect behavior + the bounded drop-oldest `evt` replay buffer with in-order reconnect replay; per-class drop counters | **done** |
-| **P3-4b** | the bridge's own GgCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); the D-B11 LWT startup cross-check; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
+| **P3-4b** | the bridge's own EdgeCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); the D-B11 LWT startup cross-check; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
 | **P3-5** | `deploy/site-broker/` recipes (HOST compose + dual-EMQX dev rig, GG DockerApplicationManager, k8s in-cluster broker + boundary-bridge example, the per-device **ACL** file, TLS notes) | **done** |
 | **P3-6** | the repeatable **dual-EMQX bridge-level e2e** (`tests/e2e/run.sh` — real binary between two real brokers, 9/9 assertions A–F green) + the `edgecommons/registry` catalog entry (`category: bridge`) | **done** |
 
@@ -313,11 +313,11 @@ The bridge and the site broker deploy **as a pair** — see
 Shipped at the v0.2.0 UNS release:
 
 - **GitHub remote + git-rev pin bump — done.** `edgecommons/uns-bridge` is published, and
-  `Cargo.toml` pins `ggcommons` at rev `b1d8d85` — the v0.2.0 UNS release on `main` — so a pure
+  `Cargo.toml` pins `edgecommons` at rev `b1d8d85` — the v0.2.0 UNS release on `main` — so a pure
   git-rev build compiles against the shipped UNS core (the gitignored sibling `[patch]` override
   is local-dev only).
 - **The 4-language `republish-state`/`republish-cfg` broadcast listener — done.** It shipped in
-  the ggcommons library (`RepublishListener` in Java/Python/TS, `uns.rs` in Rust), so the bridge's
+  the edgecommons library (`RepublishListener` in Java/Python/TS, `uns.rs` in Rust), so the bridge's
   reconnect rehydration broadcast is now answered by every rev-bumped component — no longer inert.
 - **The edge-console as the first site-side client — done.** The full-system test (console ↔ site
   broker ↔ bridge ↔ device components) has been run and passed (HOST → kind); the P3-6 e2e above
@@ -334,7 +334,7 @@ Still deferred (genuinely unbuilt):
   `instances[]` entry.
 - A Rust-only library affordance exposing the runtime's raw `MessagingProvider` so the relay can
   share the runtime's device-bus connection (see "How it connects").
-- Docs-site sync of this component's docs into the ggcommons website.
+- Docs-site sync of this component's docs into the edgecommons website.
 
 ## Operational rules
 

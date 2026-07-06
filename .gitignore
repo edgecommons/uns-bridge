@@ -2,10 +2,10 @@
 greengrass-build/
 /logs/
 
-# local-dev sibling override (build against ../ggcommons/libs/rust instead of the pinned git rev)
+# local-dev sibling override (build against ../core/libs/rust instead of the pinned git rev)
 .cargo/
 
-# Cargo.lock excluded until P3-6 bumps the ggcommons pin to the UNS-core rev on main and regenerates
+# Cargo.lock excluded until P3-6 bumps the edgecommons pin to the UNS-core rev on main and regenerates
 # it (the current lock records the local .cargo [patch] path, invalid on a fresh clone).
 /Cargo.lock
 

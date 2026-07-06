@@ -27,7 +27,7 @@ The bridge's `component.instances[].siteBroker` block (§2.7 of the design doc;
 ```
 
 These three fields map directly onto the canonical schema's `mqttCredentials` definition
-(`schema/ggcommons-config-schema.json`, shared with `messaging.local`/`messaging.iotCore` —
+(`schema/edgecommons-config-schema.json`, shared with `messaging.local`/`messaging.iotCore` —
 there is no bridge-specific credentials shape). **The certificate's CN is the device token** — it
 must equal what the ACL and the bridge's own topics use (e.g. a bridge that publishes on
 `ecv1/gw-01/...` needs a client cert with `CN=gw-01`, not `CN=uns-bridge-gw-01` or the client id).

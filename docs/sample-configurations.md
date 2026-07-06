@@ -1,6 +1,6 @@
 # Sample Configurations
 
-Complete, copy-paste-ready configurations for the UNS bridge (`com.mbreissi.uns-bridge`), built up from a
+Complete, copy-paste-ready configurations for the UNS bridge (`com.mbreissi.edgecommons.UnsBridge`), built up from a
 trivial two-broker dev loop to a realistic, TLS-secured site deployment with per-class policy — with an
 explanation of **what every option does and how it changes runtime behavior**.
 
@@ -9,7 +9,7 @@ for the topics/filters/metrics see [reference/messaging-interface.md](reference/
 envelope/hop-tag structures see [reference/data-types.md](reference/data-types.md); for task recipes see
 [how-to-guides.md](how-to-guides.md); for the model behind it all see [explanation.md](explanation.md).
 
-The bridge loads **one JSON document**. The top level carries the standard ggcommons `messaging` (the
+The bridge loads **one JSON document**. The top level carries the standard edgecommons `messaging` (the
 **device** bus), `hierarchy`/`identity`, `heartbeat`, `metricEmission`, `logging`, and the required
 `component` — whose `instances[]` entry with a `siteBroker` declares the **site** broker and every relay knob.
 The single most important thing to keep straight in every config below: **`messaging.local` is the device bus;
@@ -283,7 +283,7 @@ matters is keeping the TTL aligned with the request deadline:
 ```
 
 At runtime: a site console calls `request()` on `ecv1/gw-01/opcua-adapter/main/cmd/<verb>` with
-`header.reply_to = ggcommons/reply-<uuid>` (a topic on the *site* broker). The bridge:
+`header.reply_to = edgecommons/reply-<uuid>` (a topic on the *site* broker). The bridge:
 
 1. Mints a device-bus reply topic, subscribes it, rewrites the command's `reply_to` to it, records the
    mapping, and relays the command down (hop-tagged) — all before a fast responder could reply.

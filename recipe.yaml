@@ -5,7 +5,7 @@
 # The site-broker half landed in P3-5 (deploy/site-broker/); the remaining packaging wiring is
 # a release-time item (README "Remaining release-time items").
 RecipeFormatVersion: "2020-01-25"
-ComponentName: "com.mbreissi.uns-bridge"
+ComponentName: "com.mbreissi.edgecommons.UnsBridge"
 ComponentVersion: "1.0.0"
 ComponentDescription: "UNS bridge: one per device bus — an envelope-aware relay between the device-local bus and the site UNS broker (uplinks the six UNS classes topic-verbatim, downlinks own-device commands, hop-tag loop protection, site-connection LWT)."
 ComponentPublisher: "Marc Breissinger"
@@ -20,7 +20,7 @@ ComponentConfiguration:
       metricEmission:
         target: "messaging"
       component:
-        name: "com.mbreissi.uns-bridge"
+        name: "com.mbreissi.edgecommons.UnsBridge"
         instances:
           - id: "site"
             siteBroker:
@@ -49,7 +49,7 @@ ComponentConfiguration:
               default: 64
     accessControl:
       aws.greengrass.ipc.pubsub:
-        "com.mbreissi.uns-bridge:pubsub:1":
+        "com.mbreissi.edgecommons.UnsBridge:pubsub:1":
           policyDescription: Allows the bridge to relay all local UNS topics.
           operations:
             - "aws.greengrass#PublishToTopic"

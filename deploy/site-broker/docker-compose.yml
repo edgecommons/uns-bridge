@@ -1,5 +1,5 @@
 # uns-bridge site-broker — HOST recipe (DESIGN-uns-bridge.md §4.1) AND the local dual-EMQX test
-# rig (D-B14). EMQX everywhere (D-B13) — the ecosystem's established broker (ggcommons
+# rig (D-B14). EMQX everywhere (D-B13) — the ecosystem's established broker (edgecommons
 # test-infra/compose.yaml is the house-style precedent this mirrors).
 #
 # Two services:
@@ -9,7 +9,7 @@
 #           per site/gateway box in production.
 #   device  Opt-in (compose profile "dual"). A second, unsecured EMQX standing in for the
 #           device-local broker so this file alone gives you a full two-broker rig when you don't
-#           already have the ggcommons monorepo's `ggcommons-emqx` (test-infra/compose.yaml)
+#           already have the edgecommons monorepo's `edgecommons-emqx` (test-infra/compose.yaml)
 #           running. If you DO already have it (the common case on this dev machine — see
 #           ../../../CLAUDE.md), skip the "dual" profile: the existing broker on :1883/:8883 is the
 #           device bus, this file's `site` service is the only thing you're adding.
@@ -51,7 +51,7 @@ services:
       - ./tls-certs:/opt/emqx/etc/certs:ro
     environment:
       # mTLS listener: present the site's server cert, verify the client against the same CA, and
-      # require a client cert (no anonymous mTLS). Mirrors ggcommons/test-infra/compose.yaml's
+      # require a client cert (no anonymous mTLS). Mirrors edgecommons/test-infra/compose.yaml's
       # existing mutual-TLS listener style.
       EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE: /opt/emqx/etc/certs/ca.crt
       EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CERTFILE: /opt/emqx/etc/certs/server.crt
@@ -84,13 +84,13 @@ services:
   device:
     image: emqx/emqx:${DEVICE_IMAGE_TAG:-5.8.2}
     container_name: uns-bridge-emqx-device
-    profiles: ["dual"]   # `docker compose --profile dual up -d` — skip this if ggcommons-emqx already runs
+    profiles: ["dual"]   # `docker compose --profile dual up -d` — skip this if edgecommons-emqx already runs
     ports:
       - "${DEVICE_MQTT_PORT:-1883}:1883"
       - "${DEVICE_DASHBOARD_PORT:-18083}:18083"
     environment:
       # No ACL: the device bus is the existing trust boundary (one broker per device, no fleet
-      # aggregation happens here) — matches ggcommons-emqx's own posture (test-infra/compose.yaml).
+      # aggregation happens here) — matches edgecommons-emqx's own posture (test-infra/compose.yaml).
       EMQX_ALLOW_ANONYMOUS: "true"
     healthcheck:
       test: ["CMD", "emqx_ctl", "status"]

@@ -1,11 +1,11 @@
 //! # uns-bridge — entry point
 //!
-//! The **UNS bridge** (DESIGN-uns §9 / DESIGN-uns-bridge in the ggcommons
+//! The **UNS bridge** (DESIGN-uns §9 / DESIGN-uns-bridge in the edgecommons
 //! monorepo): one per device bus, an envelope-aware relay between the device-local
 //! bus and the site UNS broker.
 //!
-//! Since P3-4b the bridge is a **proper ggcommons component** (§2.8): a real
-//! `GgCommons` runtime — built from the same config file — owns the bridge's own
+//! Since P3-4b the bridge is a **proper edgecommons component** (§2.8): a real
+//! `EdgeCommons` runtime — built from the same config file — owns the bridge's own
 //! observability: the resolved identity, the automatic heartbeat `state` keepalive
 //! on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg`
 //! publisher, and `gg.metrics()` (the relay counters emit through it periodically,
@@ -17,14 +17,14 @@
 //!
 //! | Connection | Owner | Purpose |
 //! |---|---|---|
-//! | device bus (observability) | the `GgCommons` runtime | heartbeat `state`, `cfg` announce, `metric` emission |
+//! | device bus (observability) | the `EdgeCommons` runtime | heartbeat `state`, `cfg` announce, `metric` emission |
 //! | device bus (relay, client id `…-relay`) | the bridge | the raw byte relay (§1.3) + the reply proxy + the rehydration broadcast |
 //! | site broker | the bridge | the uplink/downlink relay target; carries the D-B11 LWT |
 //!
-//! `GgCommons` deliberately does **not** expose its raw `MessagingProvider`
+//! `EdgeCommons` deliberately does **not** expose its raw `MessagingProvider`
 //! (`DefaultMessagingService` keeps it private), and the relay must stay at the
 //! raw provider level — byte-verbatim, no reserved-class guard (§1.3) — so the
-//! relay cannot reuse the runtime's connection **without a ggcommons change,
+//! relay cannot reuse the runtime's connection **without a edgecommons change,
 //! which this slice deliberately does not make**. Follow-up (Rust-only library
 //! affordance): expose the runtime's raw provider (e.g.
 //! `DefaultMessagingService::provider()`), letting the relay share the runtime's
@@ -32,7 +32,7 @@
 //! shared-connection quota once the IPC-primary variant lands.
 //!
 //! - **SITE** connection = the bridge's external system, declared in its own
-//!   `component.instances[]` "site" entry and built by **reusing the ggcommons
+//!   `component.instances[]` "site" entry and built by **reusing the edgecommons
 //!   core's already-pub MQTT objects** (`MqttProvider::connect(&site_cfg)`) —
 //!   ZERO core change (§1.1). The site connect is retried in the bridge's own
 //!   loop (non-fatal uplink, §1.4); the provider re-subscribes every filter on
@@ -53,7 +53,7 @@
 //!   and template substitution across the whole `instances[]` entry (today only
 //!   the site `lwt.topic` is resolved).
 //! - The device-side `republish-state`/`republish-cfg` listener (a 4-language
-//!   ggcommons library slice) — until it lands, the reconnect rehydration
+//!   edgecommons library slice) — until it lands, the reconnect rehydration
 //!   broadcast is inert.
 
 mod config;
@@ -67,11 +67,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use ggcommons::messaging::config::MessagingConfig;
-use ggcommons::messaging::provider::mqtt::MqttProvider;
-use ggcommons::messaging::MessagingProvider;
-use ggcommons::uns::UnsClass;
-use ggcommons::GgCommonsBuilder;
+use edgecommons::messaging::config::MessagingConfig;
+use edgecommons::messaging::provider::mqtt::MqttProvider;
+use edgecommons::messaging::MessagingProvider;
+use edgecommons::uns::UnsClass;
+use edgecommons::EdgeCommonsBuilder;
 
 use crate::config::BridgeConfig;
 use crate::relay::RelayEngine;
@@ -84,12 +84,12 @@ compile_error!(
 
 /// The component's full name (matches `recipe.yaml` / `gdk-config.json`; its
 /// sanitized UNS token is exactly `uns-bridge`, D-U18).
-const COMPONENT_NAME: &str = "com.mbreissi.uns-bridge";
+const COMPONENT_NAME: &str = "com.mbreissi.edgecommons.UnsBridge";
 
 /// Delay between site-broker connect attempts (§1.4 — bridge-owned retry loop).
 const SITE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// Minimal bridge arguments. The standard ggcommons CLI contract is synthesized
+/// Minimal bridge arguments. The standard edgecommons CLI contract is synthesized
 /// from these for the runtime build (full contract = a documented follow-up).
 struct Args {
     config_path: String,
@@ -116,7 +116,7 @@ fn parse_args() -> anyhow::Result<Args> {
                      USAGE: uns-bridge [--config <file>] [--thing <device>]\n\n\
                      OPTIONS:\n  \
                      -c, --config <file>   bridge config (default: test-configs/config.json)\n  \
-                     -t, --thing <name>    device (thing) token; falls back to $GGCOMMONS_THING_NAME"
+                     -t, --thing <name>    device (thing) token; falls back to $EDGECOMMONS_THING_NAME"
                 );
                 std::process::exit(0);
             }
@@ -126,8 +126,8 @@ fn parse_args() -> anyhow::Result<Args> {
     // Standard identity chain, minimally: -t ▸ platform env. (Full chain with the
     // facade integration.)
     let thing = thing
-        .or_else(|| std::env::var("GGCOMMONS_THING_NAME").ok().filter(|v| !v.is_empty()))
-        .context("device identity required: pass -t/--thing or set GGCOMMONS_THING_NAME")?;
+        .or_else(|| std::env::var("EDGECOMMONS_THING_NAME").ok().filter(|v| !v.is_empty()))
+        .context("device identity required: pass -t/--thing or set EDGECOMMONS_THING_NAME")?;
     Ok(Args { config_path, thing })
 }
 
@@ -155,14 +155,14 @@ async fn main() -> anyhow::Result<()> {
     let cfg = BridgeConfig::load(&args.config_path).await?;
     let site_entry = cfg.site_instance()?;
 
-    // §2.8: the ggcommons runtime — the bridge's OBSERVABILITY device-bus
+    // §2.8: the edgecommons runtime — the bridge's OBSERVABILITY device-bus
     // connection plus identity, logging init, the heartbeat `state` keepalive,
     // the effective-config `cfg` publisher, gg.metrics(), and the library-owned
     // SIGTERM/Ctrl-C shutdown signal. The bridge's config file doubles as the
     // `--transport MQTT` payload (its top-level `messaging` section IS that
     // shape), so one file feeds both. A dead device bus is fatal — the bridge is
     // useless without it (unlike the site uplink, which retries below).
-    let gg = GgCommonsBuilder::new(COMPONENT_NAME)
+    let gg = EdgeCommonsBuilder::new(COMPONENT_NAME)
         .args(vec![
             "uns-bridge".to_string(),
             "--platform".to_string(),
@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
         ])
         .build()
         .await
-        .context("initializing the ggcommons runtime — is the device-bus broker up?")?;
+        .context("initializing the edgecommons runtime — is the device-bus broker up?")?;
 
     let engine = Arc::new(RelayEngine::new(
         &args.thing,
@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
     // suffixed `-relay` so it never collides with the runtime's). The relay runs
     // at the raw provider level by design (§1.3 — byte relay, no reserved-class
     // guard in the path); see the module docs for why it cannot share the
-    // runtime's connection without a (deliberately unmade) ggcommons change.
+    // runtime's connection without a (deliberately unmade) edgecommons change.
     let primary: Arc<dyn MessagingProvider> = Arc::new(
         MqttProvider::connect(&cfg.relay_primary_messaging()).await.context(
             "connecting the relay's device-bus (PRIMARY) connection — is the local broker up?",
@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
     // Mismatch = WARN, never a failure — config stays authoritative.
     let mut site_cfg = site_entry.site_messaging()?;
     if let Some(lwt) = site_cfg.messaging.lwt.as_mut() {
-        lwt.topic = ggcommons::config::template::resolve(&gg.config(), &lwt.topic);
+        lwt.topic = edgecommons::config::template::resolve(&gg.config(), &lwt.topic);
     }
     match gg.uns().topic(UnsClass::State) {
         Ok(expected) => observability::log_lwt_cross_check(&observability::check_lwt_topic(

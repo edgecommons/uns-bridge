@@ -1,7 +1,7 @@
 # Reference — Data Types
 
 The bridge is a relay, not a codec — it does **not** decode payloads into typed values. What it *does* read
-and write are a small set of **envelope structures**: the ggcommons message envelope (to append a hop tag and,
+and write are a small set of **envelope structures**: the edgecommons message envelope (to append a hop tag and,
 for a reply, to rewrite a header), the reserved `_relay` hop tag, the reply `reply_to`, and the UNS class
 taxonomy that decides routing. This page is the reference for those structures. For the topics and messages
 they ride on, see [messaging-interface.md](messaging-interface.md).
@@ -12,7 +12,7 @@ Every message the bridge touches is one of two kinds, and it treats them differe
 
 | Kind | What it is | How the bridge relays it |
 |------|-----------|--------------------------|
-| **Envelope** | A ggcommons message: a JSON object with a `header` (and optionally `identity`, `tags`, `body`). | Parsed; the **hop tag** is appended (and for a reply, `header.reply_to` is stripped); re-serialized and forwarded. Structurally identical to the input except those touches. |
+| **Envelope** | A edgecommons message: a JSON object with a `header` (and optionally `identity`, `tags`, `body`). | Parsed; the **hop tag** is appended (and for a reply, `header.reply_to` is stripped); re-serialized and forwarded. Structurally identical to the input except those touches. |
 | **Raw** | Anything else — a bare JSON value with no envelope shape, or non-JSON bytes. | Forwarded **byte-for-byte**. No tag is added (there is nowhere to put one); never re-wrapped as `{"raw": …}`. |
 
 A message that *claims* to be an envelope but is malformed (e.g. `header` is not an object) is **dropped**
@@ -22,9 +22,9 @@ The consequence for loop protection: raw messages cannot carry the hop tag, so t
 **class-disjointness** structural guard (uplink and downlink relay disjoint class sets — see
 [messaging-interface.md](messaging-interface.md#the-relay-matrix)).
 
-## The GGCommons envelope
+## The EdgeCommons envelope
 
-The standard ggcommons envelope: `{ header, identity, tags, body }`. The bridge only ever
+The standard edgecommons envelope: `{ header, identity, tags, body }`. The bridge only ever
 reads/writes `header` (for replies) and `tags` (for the hop tag); `identity` and `body` travel untouched.
 
 ```jsonc
@@ -34,7 +34,7 @@ reads/writes `header` (for replies) and `tags` (for the hop tag); `identity` and
     "version": "1.0",
     "uuid": "…", "timestamp": "…",
     "correlation_id": "corr-1",               // preserved verbatim across the bridge
-    "reply_to": "ggcommons/reply-<uuid>"      // REWRITTEN on downlink; DROPPED on the reply back-haul
+    "reply_to": "edgecommons/reply-<uuid>"      // REWRITTEN on downlink; DROPPED on the reply back-haul
   },
   "identity": { "hier": [ … ], "path": "dallas/gw-01", "component": "opcua-adapter", "instance": "main" },
   "tags": {
@@ -81,11 +81,11 @@ Edge behaviors, exactly as implemented:
 
 | Where | What the bridge does |
 |-------|----------------------|
-| **Downlink `cmd` with `reply_to`** | Replaces the site-side `reply_to` (e.g. `ggcommons/reply-<uuid>` on the *site* broker) with a **freshly minted** `ggcommons/reply-<uuid>` topic on the *device* bus, subscribes that topic, and records `bridge topic → original site reply_to`. A `cmd` **without** `reply_to` is a fire-and-forget notification — passed through untouched. |
+| **Downlink `cmd` with `reply_to`** | Replaces the site-side `reply_to` (e.g. `edgecommons/reply-<uuid>` on the *site* broker) with a **freshly minted** `edgecommons/reply-<uuid>` topic on the *device* bus, subscribes that topic, and records `bridge topic → original site reply_to`. A `cmd` **without** `reply_to` is a fire-and-forget notification — passed through untouched. |
 | **The reply back-haul** | `header.reply_to` is **dropped** entirely (a reply carries none, and a device-bus topic is meaningless at the site). |
 
 `correlation_id`, `body`, `identity`, and every other tag are preserved verbatim across both. The minted topic
-uses the core's standard `ggcommons/reply-` prefix, so it is a non-UNS topic (never matches a UNS filter) and
+uses the core's standard `edgecommons/reply-` prefix, so it is a non-UNS topic (never matches a UNS filter) and
 is structurally exempt from the reserved-class guard.
 
 ## The UNS class taxonomy (what routes where)
@@ -121,7 +121,7 @@ On a site-reconnect rising edge the bridge publishes two notification-style `cmd
 ```
 
 They carry **no** `identity`, **no** `tags`, and **no** `reply_to` — fire-and-forget. Each device component
-answers by re-announcing its state keepalive and effective cfg. Answering is built into the ggcommons library
+answers by re-announcing its state keepalive and effective cfg. Answering is built into the edgecommons library
 (the four-language device-side `RepublishListener`), on by default — components need no wiring. See
 [explanation → reconnect rehydration](../explanation.md#reconnect-rehydration).
 
@@ -140,7 +140,7 @@ whole device flip to UNREACHABLE on an abrupt bridge/device death — no bespoke
 
 ## Metric value shapes
 
-The relay counters are emitted as ggcommons metrics (see [messaging-interface.md](messaging-interface.md#metrics)).
+The relay counters are emitted as edgecommons metrics (see [messaging-interface.md](messaging-interface.md#metrics)).
 Two value kinds:
 
 | Kind | Emitted value | Examples |

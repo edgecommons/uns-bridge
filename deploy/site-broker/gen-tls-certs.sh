@@ -2,7 +2,7 @@
 # Generate throwaway TLS dev/test certificates for the uns-bridge site broker: a CA, a server cert
 # for the broker itself, and TWO client certs exercising the two identity classes the ACL
 # (acl.conf) distinguishes — a device bridge (CN=gw-01) and a site consumer (CN=consumer-console).
-# Mirrors ggcommons/test-infra/gen-tls-certs.sh's structure; see TLS.md for how these plug in.
+# Mirrors edgecommons/test-infra/gen-tls-certs.sh's structure; see TLS.md for how these plug in.
 #
 # Output goes to ./tls-certs/ (gitignored). Safe to re-run. THESE ARE DEV/TEST CERTS ONLY — a real
 # deployment issues one client cert per device from a real (or site-private) CA; see TLS.md "prod".

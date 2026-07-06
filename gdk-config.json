@@ -1,6 +1,6 @@
 {
   "component": {
-    "com.mbreissi.uns-bridge": {
+    "com.mbreissi.edgecommons.UnsBridge": {
       "author": "Marc Breissinger",
       "version": "NEXT_PATCH",
       "build": {

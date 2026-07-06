@@ -187,7 +187,7 @@ Loop protection is automatic (the hop tag), but two knobs and one rule matter:
 (`component.instances[site]`):
 
 ```bash
-uns-bridge --config ./config.json --thing gw-01     # -t falls back to $GGCOMMONS_THING_NAME
+uns-bridge --config ./config.json --thing gw-01     # -t falls back to $EDGECOMMONS_THING_NAME
 ```
 
 **Kubernetes (boundary bridge):** deploy the *same* binary as a `replicas: 1` / `strategy: Recreate`

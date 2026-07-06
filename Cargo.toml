@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-description = "Envelope-aware UNS relay between a device-local bus and the site UNS broker: uplinks the six ggcommons UNS classes topic-verbatim, downlinks own-device commands, with hop-tag loop protection. One uns-bridge per device bus."
+description = "Envelope-aware UNS relay between a device-local bus and the site UNS broker: uplinks the six edgecommons UNS classes topic-verbatim, downlinks own-device commands, with hop-tag loop protection. One uns-bridge per device bus."
 publish = false
 
-# The uns-bridge component (DESIGN-uns §9 / DESIGN-uns-bridge in the ggcommons monorepo).
+# The uns-bridge component (DESIGN-uns §9 / DESIGN-uns-bridge in the edgecommons monorepo).
 # The site broker is the bridge's EXTERNAL SYSTEM (like an adapter's OPC UA endpoints): the
-# bridge builds its site connection by reusing the ggcommons core's already-pub MQTT objects
+# bridge builds its site connection by reusing the edgecommons core's already-pub MQTT objects
 # (`MqttProvider::connect`) from its own `component.instances[]` config — ZERO core change.
 
 [[bin]]
@@ -20,29 +20,29 @@ path = "src/main.rs"
 # HOST / KUBERNETES-boundary binary: dual raw MQTT (device bus + site broker). This is the
 # P3-2 target pair (MQTT <-> MQTT).
 default = ["standalone"]
-standalone = ["ggcommons/standalone"]
-# GREENGRASS variant (PRIMARY = Nucleus IPC, SITE = MQTT): the ggcommons IPC provider is a
+standalone = ["edgecommons/standalone"]
+# GREENGRASS variant (PRIMARY = Nucleus IPC, SITE = MQTT): the edgecommons IPC provider is a
 # Linux-only C-FFI build. The IPC-primary wiring in this component is a documented follow-up
 # (see README "Roadmap"); enabling this feature today only compiles the library's IPC provider.
-greengrass = ["ggcommons/greengrass"]
+greengrass = ["edgecommons/greengrass"]
 
 [dependencies]
-# The ggcommons Rust library (git-rev pinned — the telemetry-processor pattern; CI resolves
+# The edgecommons Rust library (git-rev pinned — the telemetry-processor pattern; CI resolves
 # this rev, LOCAL DEV builds against the sibling checkout via the gitignored
 # .cargo/config.toml `[patch]` override and never touches this pin).
 #
 # The pin below is the UNS core on the remote `main`: rev b1d8d85 is the v0.2.0 UNS release
-# (`chore(release): bump ggcommons libs 0.1.1 -> 0.2.0 (UNS release)`), which carries the
+# (`chore(release): bump edgecommons libs 0.1.1 -> 0.2.0 (UNS release)`), which carries the
 # grammar / top-level identity / `gg.uns()` / reserved-guard / `request()`-deadline / LWT
 # surface plus the `_bcast` republish listener this bridge relies on. A pure git-rev build
 # compiles against it; the gitignored `.cargo/config.toml` `[patch]` override is only for
 # local dev against uncommitted sibling-lib changes.
-ggcommons = { git = "https://github.com/edgecommons/ggcommons.git", rev = "b1d8d85bed1e989928d083323ef8be98132d77d5", default-features = false }
+edgecommons = { git = "https://github.com/edgecommons/edgecommons.git", rev = "b1d8d85bed1e989928d083323ef8be98132d77d5", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-# (tracing-subscriber removed in P3-4b: the GgCommons runtime owns logging init,
+# (tracing-subscriber removed in P3-4b: the EdgeCommons runtime owns logging init,
 # from the config's `logging` section.)
 anyhow = "1"
 

@@ -7,7 +7,7 @@
 //! so every decision is deterministic under test.
 //!
 //! (Section references are to `docs/platform/DESIGN-uns-bridge.md` in the
-//! ggcommons monorepo; the decision-register entry is **D-B10**.)
+//! edgecommons monorepo; the decision-register entry is **D-B10**.)
 //!
 //! ## Semantics (§2.5)
 //! - **Enable/disable**: each of the seven uplinkable classes
@@ -43,7 +43,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use ggcommons::uns::UnsClass;
+use edgecommons::uns::UnsClass;
 
 use crate::config::UplinkConfig;
 

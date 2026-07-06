@@ -6,11 +6,11 @@
 # alongside the bridge's own org integration; see ../README.md for the artifact/lifecycle notes.
 #
 # NOTE ON NAMING: this is a DIFFERENT Greengrass component from the bridge itself
-# (`com.mbreissi.uns-bridge`, ../../recipe.yaml) — the gateway core that hosts the site broker also
+# (`com.mbreissi.edgecommons.UnsBridge`, ../../recipe.yaml) — the gateway core that hosts the site broker also
 # typically runs its OWN uns-bridge (its local Nucleus IPC bus is a device bus like any other,
 # §4.2), so a gateway deployment normally merges BOTH components.
 RecipeFormatVersion: "2020-01-25"
-ComponentName: "com.mbreissi.site-broker"
+ComponentName: "com.mbreissi.edgecommons.SiteBroker"
 ComponentVersion: "1.0.0"
 ComponentDescription: "uns-bridge site broker: EMQX running as a GG-managed Docker container on the gateway core — the aggregation point every device's uns-bridge uplinks to (DESIGN-uns-bridge.md §4.2/D-B13). Ships with the per-device ACL (acl.conf) mounted; see ../TLS.md for cert provisioning."
 ComponentPublisher: "Marc Breissinger"

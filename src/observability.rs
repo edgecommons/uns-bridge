@@ -6,11 +6,11 @@
 //! §2.6/§3.7 **D-B11 LWT startup cross-check** (configured site LWT topic vs the
 //! bridge's real state topic).
 //!
-//! (Section references are to `docs/platform/DESIGN-uns-bridge.md` in the ggcommons
+//! (Section references are to `docs/platform/DESIGN-uns-bridge.md` in the edgecommons
 //! monorepo.)
 //!
 //! The IO halves live elsewhere: [`crate::io`] snapshots the live
-//! [`crate::io::RelayCounters`] and emits the groups through the ggcommons
+//! [`crate::io::RelayCounters`] and emits the groups through the edgecommons
 //! `MetricService` on a fixed cadence; [`crate::main`] runs the LWT cross-check at
 //! startup (WARN on mismatch — advisory, config stays authoritative, D-B11).
 //!
@@ -452,14 +452,14 @@ mod tests {
 
     #[test]
     fn shipped_config_passes_the_canonical_schema_and_derives_the_state_topic() {
-        use ggcommons::config::model::Config;
-        use ggcommons::uns::{Uns, UnsClass};
+        use edgecommons::config::model::Config;
+        use edgecommons::uns::{Uns, UnsClass};
 
         let raw: serde_json::Value =
             serde_json::from_str(include_str!("../test-configs/config.json")).unwrap();
         // Pins that `-c FILE test-configs/config.json` passes the runtime's
-        // canonical-schema validation (GgCommonsBuilder::build validates).
-        ggcommons::config::validation::validate(&raw).expect("canonical schema must accept");
+        // canonical-schema validation (EdgeCommonsBuilder::build validates).
+        edgecommons::config::validation::validate(&raw).expect("canonical schema must accept");
 
         // And that the runtime identity derives EXACTLY the D-B11 state topic the
         // shipped lwt.topic pins (gg.uns().topic(State) — what main cross-checks).

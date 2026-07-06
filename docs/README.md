@@ -1,12 +1,12 @@
 # uns-bridge — Documentation
 
-`com.mbreissi.uns-bridge` is an **envelope-aware relay** that joins a device-local message bus to the
+`com.mbreissi.edgecommons.UnsBridge` is an **envelope-aware relay** that joins a device-local message bus to the
 **site UNS broker** — one bridge per device bus. Every device carries its own bus (a local MQTT broker
 on HOST, the Nucleus IPC bus on Greengrass) with no cross-device visibility; the bridge subscribes the
 device's Unified-Namespace traffic, republishes it **topic-verbatim** onto the site broker under the
 device's namespace, and relays commands back down. Any site-scoped consumer — a historian, an MES
 bridge, the edge console — then connects to **one** bus instead of every device's. Built on the
-`ggcommons` (`greengrass-commons`) Rust library, the bridge is itself a first-class ggcommons component:
+`edgecommons` (`edgecommons`) Rust library, the bridge is itself a first-class edgecommons component:
 it has its own identity, heartbeat, config announce, and metrics, all of which ride its own relay.
 
 Unlike a dumb broker-to-broker bridge it understands the message envelope: it stamps a **hop tag** for
@@ -45,7 +45,7 @@ Last-Will for reachability.
 These docs are for **integrators and operators** — people who deploy the bridge, run the site broker it
 pairs with, and write the site-side clients that consume device traffic or command devices across it.
 They do not cover modifying the bridge's own source (for that, the module-level rustdoc in `src/*.rs` and
-`docs/platform/DESIGN-uns-bridge.md` in the ggcommons monorepo are the reference).
+`docs/platform/DESIGN-uns-bridge.md` in the edgecommons monorepo are the reference).
 
 ## Platforms at a glance
 

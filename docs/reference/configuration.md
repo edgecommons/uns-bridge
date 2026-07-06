@@ -7,12 +7,12 @@ Every configuration option. For *why* these exist, see [explanation.md](../expla
 
 ## Config source
 
-The bridge reads **one JSON document**. That same file feeds two things: the ggcommons runtime loads it as
+The bridge reads **one JSON document**. That same file feeds two things: the edgecommons runtime loads it as
 the standard `-c FILE` config (and its top-level `messaging` section doubles as the `--transport MQTT`
 payload — the **device** bus), and the bridge reads its own `component.instances[]` from it (the **site**
-broker). The file is validated against the canonical ggcommons config schema at startup.
+broker). The file is validated against the canonical edgecommons config schema at startup.
 
-The bridge's CLI is minimal — `--config <file>` and `--thing <name>` — and synthesizes the standard ggcommons
+The bridge's CLI is minimal — `--config <file>` and `--thing <name>` — and synthesizes the standard edgecommons
 argv (`--platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`) internally.
 
 ## Top-level sections
@@ -25,24 +25,24 @@ argv (`--platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`) inter
 | `identity` | optional | Values for every hierarchy level except the last (the resolved thing name). Together with `hierarchy` these set the bridge's own `identity` and its real `state` topic (which the LWT cross-check compares against). |
 | `heartbeat` | optional | The bridge's own `state` keepalive (`{enabled, intervalSecs}`; on by default, 5 s). |
 | `metricEmission` | optional | Routes the relay counters (`target: messaging` publishes them on the UNS `metric` class — the sample setting). |
-| `logging` | optional | Standard ggcommons logging (console `info` by default). |
+| `logging` | optional | Standard edgecommons logging (console `info` by default). |
 | `topic` | optional | `includeRoot` (default `false`); insert the site level after `ecv1` on a multi-site broker (effective only for a multi-level hierarchy). |
 
-The top level tolerates other standard ggcommons sections (`tags`, etc.); unknown sections in the bridge's
+The top level tolerates other standard edgecommons sections (`tags`, etc.); unknown sections in the bridge's
 own parse are ignored (forward compatibility).
 
 > **There is deliberately no `component.name` in config.** The canonical schema allows only `global`/`instances`
-> under `component`; the component's full name (`com.mbreissi.uns-bridge`) is supplied by the runtime builder,
+> under `component`; the component's full name (`com.mbreissi.edgecommons.UnsBridge`) is supplied by the runtime builder,
 > never by config. (The Greengrass `recipe.yaml` default config does set `component.name`, but that value is
 > not what names the component.)
 
 ## `messaging` (the device bus)
 
-The standard ggcommons `messaging` section. Only the fields the bridge relies on are called out here.
+The standard edgecommons `messaging` section. Only the fields the bridge relies on are called out here.
 
 | Key | Type | Default | Definition |
 |-----|------|---------|-----------|
-| `local` | object | **required** | The device broker: `host`, `port`, `clientId` (+ `credentials`/TLS as any ggcommons broker). The runtime connects with the configured `clientId`; the relay connects with `clientId + "-relay"`. |
+| `local` | object | **required** | The device broker: `host`, `port`, `clientId` (+ `credentials`/TLS as any edgecommons broker). The runtime connects with the configured `clientId`; the relay connects with `clientId + "-relay"`. |
 | `requestTimeoutSeconds` | number | `30` | The framework request-deadline. **Paired** with `reply.ttlSecs` — see below. |
 | `lwt` | object | — | A device-bus Last-Will, if any, belongs to the **runtime** connection; the relay connection always strips it (the will must never be registered twice). The bridge's *load-bearing* LWT is the **site** LWT (`instances[site].lwt`), not this one. |
 
@@ -64,7 +64,7 @@ named `"site"` is an error (ambiguous); no site entry at all is an error.
 
 ### `siteBroker`
 
-The library `mqttBroker` shape (identical to any ggcommons broker config).
+The library `mqttBroker` shape (identical to any edgecommons broker config).
 
 | Key | Type | Definition |
 |-----|------|-----------|
@@ -199,6 +199,6 @@ The bundled [`test-configs/config.json`](../../test-configs/config.json) — dev
 
 - **Greengrass PRIMARY = Nucleus IPC is not supported.** The binary requires the default `standalone`
   feature; on a Greengrass core it runs in its HOST shape against a device-local MQTT broker.
-- **The CLI is `--config`/`--thing` only** — it synthesizes the standard HOST/MQTT ggcommons argv internally.
+- **The CLI is `--config`/`--thing` only** — it synthesizes the standard HOST/MQTT edgecommons argv internally.
 - **Template substitution reaches only the site `lwt.topic`** (`{ThingName}`); other `instances[]` values are
   taken literally.

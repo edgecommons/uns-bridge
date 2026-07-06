@@ -4,7 +4,7 @@ The site broker and the `uns-bridge` **deploy as a pair** — a bridge with no s
 at does nothing useful, and a site broker with no ACL is a hole, not a boundary. This directory
 holds the broker-side half; the bridge's own packaging (`recipe.yaml`, `gdk-config.json`,
 `build.sh`) lives at the repo root. EMQX is the broker everywhere (HOST, GREENGRASS, KUBERNETES) —
-the ecosystem's established choice (`../../CLAUDE.md`'s "Local EMQX broker" note; `ggcommons`'s
+the ecosystem's established choice (`../../CLAUDE.md`'s "Local EMQX broker" note; `edgecommons`'s
 `test-infra/compose.yaml` is the house-style precedent every file here mirrors).
 
 ## Which recipe for which platform
@@ -25,9 +25,9 @@ only thing stopping a bridge (misconfigured, compromised, or just buggy) from pu
 its own device's subtree is this file. It confines every device bridge's client (identified by its
 mTLS certificate's Common Name, mapped to the MQTT username) to exactly:
 
-- **publish** `ecv1/<device>/#` and `ggcommons/+` (its own device subtree + the reply back-haul,
+- **publish** `ecv1/<device>/#` and `edgecommons/+` (its own device subtree + the reply back-haul,
   §2.4)
-- **subscribe** `ecv1/<device>/+/+/cmd/#` and `ggcommons/+` (only commands addressed to its own
+- **subscribe** `ecv1/<device>/+/+/cmd/#` and `edgecommons/+` (only commands addressed to its own
   device, including the `_bcast` broadcast — `+` in the component position — plus reply topics)
 - everything else: **denied**
 
@@ -47,8 +47,8 @@ boundary traffic).
 
 ## Running the local dual-EMQX rig (D-B14)
 
-The most common case on this dev machine: the ggcommons monorepo's own device broker
-(`ggcommons-emqx`, `ggcommons/test-infra/compose.yaml`) is already running on `:1883`/`:8883`. This
+The most common case on this dev machine: the edgecommons monorepo's own device broker
+(`edgecommons-emqx`, `edgecommons/test-infra/compose.yaml`) is already running on `:1883`/`:8883`. This
 directory's `docker-compose.yml` then only needs to add the **site** broker:
 
 ```bash
@@ -58,7 +58,7 @@ cp .env.example .env         # defaults already match this layout; edit only for
 docker compose up -d         # starts just the site broker: :1884 (plaintext) / :8884 (mTLS) / :18084 (dashboard)
 ```
 
-If you don't already have `ggcommons-emqx` running (a fresh checkout, or you'd rather not clone the
+If you don't already have `edgecommons-emqx` running (a fresh checkout, or you'd rather not clone the
 monorepo), this same file gives you a **complete two-broker rig** on its own:
 
 ```bash

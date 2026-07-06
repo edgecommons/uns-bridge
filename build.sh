@@ -6,18 +6,18 @@
 #   - the recipe   in  greengrass-build/recipes/
 #   - the artifact in  greengrass-build/artifacts/<ComponentName>/<ComponentVersion>/
 #
-# Greengrass cores typically run Linux: build on a Linux host or set GGCOMMONS_TARGET to a
+# Greengrass cores typically run Linux: build on a Linux host or set EDGECOMMONS_TARGET to a
 # Linux triple you have a toolchain for.
 set -euo pipefail
 
-COMPONENT_NAME="com.mbreissi.uns-bridge"
+COMPONENT_NAME="com.mbreissi.edgecommons.UnsBridge"
 COMPONENT_VERSION="1.0.0"
 BIN_NAME="uns-bridge"
 
 # P3-2 ships the standalone (dual-MQTT) relay; the greengrass (IPC-primary) variant is a
 # documented follow-up.
-FEATURES="${GGCOMMONS_FEATURES:-standalone}"
-TARGET="${GGCOMMONS_TARGET:-}"
+FEATURES="${EDGECOMMONS_FEATURES:-standalone}"
+TARGET="${EDGECOMMONS_TARGET:-}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 
 echo "Building ${BIN_NAME} (release, features=${FEATURES})${TARGET:+ for ${TARGET}}..."

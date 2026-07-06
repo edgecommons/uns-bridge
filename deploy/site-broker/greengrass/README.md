@@ -12,7 +12,7 @@ P3-6.
 EMQX is a third-party binary with its own container image and its own lifecycle (compose up/down);
 wrapping it in a GG component whose only job is "run this container" is exactly what
 `aws.greengrass.DockerApplicationManager` is for (AWS-maintained, no code of ours to build/publish
-for the broker itself). The bridge (`../../recipe.yaml`) is a *real* ggcommons component because it
+for the broker itself). The bridge (`../../recipe.yaml`) is a *real* edgecommons component because it
 has actual business logic (the relay); the broker doesn't.
 
 ## Artifact / image
@@ -61,5 +61,5 @@ slice). Actually deploying it needs, in order:
    are staged by hand, not by CI).
 2. Production TLS material provisioned per gateway (`../TLS.md`).
 3. `greengrass-cli deployment create --recipeDir … --artifactDir … --merge
-   "com.mbreissi.site-broker=1.0.0"` on a real core (the lab-5950x pattern documented in
+   "com.mbreissi.edgecommons.SiteBroker=1.0.0"` on a real core (the lab-5950x pattern documented in
    `../../../CLAUDE.md`'s validation matrix), alongside the bridge's own component.

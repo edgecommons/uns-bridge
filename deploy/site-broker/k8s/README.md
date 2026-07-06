@@ -1,6 +1,6 @@
 # KUBERNETES site-broker recipe (§4.3)
 
-**No bridge runs inside a cluster, by default.** Every in-cluster ggcommons component already
+**No bridge runs inside a cluster, by default.** Every in-cluster edgecommons component already
 shares one broker (`messaging.local` pointing at its Service DNS) — aggregation across components
 is native to the cluster, so there is nothing for a `uns-bridge` to relay (DESIGN-uns-bridge.md
 §4.3 / DESIGN-uns.md §9.2). `emqx.yaml` is that broker: apply it, point every in-cluster
@@ -9,11 +9,11 @@ done.
 
 ## `emqx.yaml` — the in-cluster broker
 
-A Deployment + Service, structurally the same shape as `ggcommons/test-infra/k8s/emqx.yaml` (the
+A Deployment + Service, structurally the same shape as `edgecommons/test-infra/k8s/emqx.yaml` (the
 existing kind/k3s smoke precedent) — plaintext-only, anonymous, **no ACL**. That last part is a
 deliberate departure from the HOST/GREENGRASS recipes, and worth explaining rather than papering
 over: every in-cluster component connects anonymously (no client cert), same as the existing
-`ggcommons-emqx` precedent — the cluster's own NetworkPolicy/RBAC is the trust boundary for
+`edgecommons-emqx` precedent — the cluster's own NetworkPolicy/RBAC is the trust boundary for
 in-cluster traffic, not per-pod MQTT identity. `acl.conf`'s rules are keyed on `${username}`
 (populated from a client cert's CN); EMQX's open-source edition evaluates **one global
 authorization chain across every listener** (no per-listener ACL scoping), so mounting `acl.conf`
@@ -39,7 +39,7 @@ process or a GG component. The manifest is marked **EXAMPLE ONLY** in its header
   and publishing one is a release-time item (root README "Release state & remaining follow-ups"; the
   registry entry itself landed in P3-6), not part of the site-broker recipes this slice delivers.
 - The bridge's CLI today is the minimal `--config <path> [--thing <name>]` form, not yet the
-  standard `-c/--platform/--transport` contract every other ggcommons component has (see
+  standard `-c/--platform/--transport` contract every other edgecommons component has (see
   `../../README.md` "Still deferred (genuinely unbuilt)"). A mounted ConfigMap file path works fine as a `--config`
   argument, but the CONFIGMAP *source's* hot-reload-on-`..data`-swap behavior other components get
   is not there yet — a known, documented gap, not something this slice fixes.
@@ -55,11 +55,11 @@ both be running.
 
 Validated (no live cluster): both manifests are well-formed YAML (`kubectl apply --dry-run=client`
 needs a live API server for full schema validation, which wasn't run — but the shapes mirror the
-already-validated `ggcommons/test-infra/k8s/emqx.yaml` and
-`ggcommons/templates/rust/k8s/deployment.yaml` precedents closely enough that structural mistakes
+already-validated `edgecommons/test-infra/k8s/emqx.yaml` and
+`edgecommons/templates/rust/k8s/deployment.yaml` precedents closely enough that structural mistakes
 would be surprising).
 
 Left as live-deploy steps: actually applying `emqx.yaml` to kind/k3s and confirming a component
-reaches it (the `ggcommons/test-infra/k8s/smoke.sh` pattern would be the natural harness to extend);
+reaches it (the `edgecommons/test-infra/k8s/smoke.sh` pattern would be the natural harness to extend);
 building a uns-bridge container image before `boundary-bridge.example.yaml` can run at all; and, if
 the mTLS-exposure block is used, provisioning the actual server cert/key Secret (`../TLS.md` "Prod").

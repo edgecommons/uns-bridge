@@ -25,18 +25,18 @@ subsystem's job, not the bus's — with one deliberate exception: events/alarms 
 ## The three connections
 
 A common first assumption is that a bridge is one process with two connections (device and site). It is
-actually **three**, because the bridge is a proper ggcommons component that also needs to observe *itself*.
+actually **three**, because the bridge is a proper edgecommons component that also needs to observe *itself*.
 
 ```mermaid
 flowchart LR
   subgraph device["Device bus (local MQTT / Nucleus IPC)"]
-    obs["OBSERVABILITY conn\n(GgCommons runtime)"]
+    obs["OBSERVABILITY conn\n(EdgeCommons runtime)"]
     relayp["RELAY PRIMARY conn\n(raw provider, id …-relay)"]
   end
   subgraph site["Site UNS broker"]
     sitec["SITE conn\n(reused MqttProvider + LWT)"]
   end
-  runtime["ggcommons runtime:\nidentity · heartbeat state ·\ncfg announce · gg.metrics()"] --> obs
+  runtime["edgecommons runtime:\nidentity · heartbeat state ·\ncfg announce · gg.metrics()"] --> obs
   engine["Relay engine + policy +\nreply proxy"] --> relayp
   engine --> sitec
   relayp -. "uplink 6 classes\n(incl. the bridge's OWN state/cfg/metric)" .-> sitec
@@ -45,13 +45,13 @@ flowchart LR
 
 | Connection | Owner | Built from | Purpose |
 |---|---|---|---|
-| **OBSERVABILITY** (device bus) | the `GgCommons` runtime | the standard `messaging` section of the config file (which doubles as the `--transport MQTT` payload) | the bridge's own identity, logging init, the heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` announce, `gg.metrics()`, and the library-owned SIGTERM/Ctrl-C shutdown signal |
+| **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime | the standard `messaging` section of the config file (which doubles as the `--transport MQTT` payload) | the bridge's own identity, logging init, the heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` announce, `gg.metrics()`, and the library-owned SIGTERM/Ctrl-C shutdown signal |
 | **RELAY PRIMARY** (device bus) | the bridge | the same `messaging` section, with `-relay` appended to every client id and any `lwt` stripped | the raw byte relay, the reply proxy's device-side reply topics, and the reconnect rehydration broadcast |
-| **SITE** | the bridge | the bridge's own `component.instances[]` `"site"` entry, by reusing the ggcommons core's public `MqttProvider::connect` | the uplink target and downlink source; carries the Last-Will `UNREACHABLE` (LWT) |
+| **SITE** | the bridge | the bridge's own `component.instances[]` `"site"` entry, by reusing the edgecommons core's public `MqttProvider::connect` | the uplink target and downlink source; carries the Last-Will `UNREACHABLE` (LWT) |
 
 **Why two connections to the *same* device bus?** The relay must operate at the **raw provider level** —
 byte-verbatim, with *no* reserved-class publish guard — because it forwards messages other components
-authored (including publishes to reserved classes like `state`/`metric`). The `GgCommons` runtime
+authored (including publishes to reserved classes like `state`/`metric`). The `EdgeCommons` runtime
 deliberately keeps its raw `MessagingProvider` private (its `MessagingService` always enforces the
 reserved-class guard), so the relay cannot borrow the runtime's connection. The cost is one extra local TCP
 client on the device broker — trivial on HOST — and the two clients must not share an MQTT id (a shared id
@@ -116,13 +116,13 @@ doubles as a "which path did this message take" breadcrumb.
 ## Request/reply across the bridge — the correlation map
 
 Fire-and-forget commands relay untouched. **Request/reply** breaks without help, because `header.reply_to`
-names a topic on the *site* broker (typically an ephemeral `ggcommons/reply-<uuid>`), and a device-side
+names a topic on the *site* broker (typically an ephemeral `edgecommons/reply-<uuid>`), and a device-side
 responder replying onto the *device* bus would shout into a room where the requester isn't standing.
 
 The bridge proxies the reply path:
 
 1. **Down** — a relayed `cmd` carrying `header.reply_to` gets a **bridge-minted** reply topic
-   (`ggcommons/reply-<uuid>`, the core's standard prefix, so it is indistinguishable from any other reply
+   (`edgecommons/reply-<uuid>`, the core's standard prefix, so it is indistinguishable from any other reply
    topic and structurally exempt from the reserved-class guard) written into its header. The bridge
    **subscribes that topic on the device bus first**, then relays the rewritten command, and records
    `bridge topic → original site reply topic` in a TTL'd correlation map. Subscribing before publishing
@@ -171,7 +171,7 @@ device component re-announces its `state` keepalive and effective `cfg`, which t
 site view rehydrates without retain.
 
 Each device component answers by re-announcing its state keepalive and effective cfg. Answering is built into
-the ggcommons library (the four-language device-side `RepublishListener`), on by default — components need no
+the edgecommons library (the four-language device-side `RepublishListener`), on by default — components need no
 wiring. A reconnecting bridge's rehydration completes automatically, without relying on broker retain.
 
 ## The bridge's own observability

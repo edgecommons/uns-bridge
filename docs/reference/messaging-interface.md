@@ -76,7 +76,7 @@ ecv1/+/+/+/metric/#  ecv1/+/+/+/data/#   ecv1/+/+/+/log/#
 
 ## What the bridge itself publishes
 
-Because the bridge is a ggcommons component, it also **originates** traffic (on the device bus, via its
+Because the bridge is a edgecommons component, it also **originates** traffic (on the device bus, via its
 OBSERVABILITY connection), which then rides its own uplink to the site:
 
 | Topic | Class | Cadence | What |
@@ -85,13 +85,13 @@ OBSERVABILITY connection), which then rides its own uplink to the site:
 | `ecv1/{device}/uns-bridge/main/cfg` | `cfg` | on start / change | The bridge's effective (redacted) config. |
 | `ecv1/{device}/uns-bridge/main/metric/<name>` | `metric` | 30 s | The relay counters/gauges (below). |
 | `ecv1/{device}/_bcast/main/cmd/republish-state` · `…/republish-cfg` | `cmd` | site-reconnect rising edge | The rehydration broadcasts, on the **device bus** only (best-effort; device components answer via the library's `RepublishListener`). |
-| `ggcommons/reply-<uuid>` | (non-UNS) | per proxied request | A bridge-minted reply topic on the **device bus**, subscribed for one reply (see below). |
+| `edgecommons/reply-<uuid>` | (non-UNS) | per proxied request | A bridge-minted reply topic on the **device bus**, subscribed for one reply (see below). |
 
 ## Request/reply proxying
 
 A downlink `cmd` carrying `header.reply_to` is proxied through the correlation map:
 
-1. The bridge mints a device-bus reply topic (`ggcommons/reply-<uuid>`), **subscribes it first**, rewrites the
+1. The bridge mints a device-bus reply topic (`edgecommons/reply-<uuid>`), **subscribes it first**, rewrites the
    command's `header.reply_to` to it, records `bridge topic → original site reply_to`, then relays the command
    to the device bus (hop-tagged).
 2. The **first** message on that bridge topic is relayed to the **original** site `reply_to`, verbatim except
@@ -152,7 +152,7 @@ ACL-enforcing site broker.
 
 ## Startup, shutdown, and reconnection behavior
 
-- **Startup order:** ggcommons runtime (device bus, fatal if down) → relay's raw device-bus connection (fatal
+- **Startup order:** edgecommons runtime (device bus, fatal if down) → relay's raw device-bus connection (fatal
   if down) → LWT template-resolve + cross-check (advisory WARN) → site connect (retried forever, ~5 s between
   tries; abandonable by a shutdown signal) → subscribe all filters → `relay running`.
 - **Intermittent uplink:** the site connect retries in the bridge's own loop; the provider re-subscribes every
@@ -170,7 +170,7 @@ The bridge's minimal CLI:
 | Flag | Values | Notes |
 |------|--------|-------|
 | `-c`, `--config` | `<file>` | Bridge config file (default `test-configs/config.json`). Feeds both the runtime (`-c FILE <file>`) and the bridge's own site parse. |
-| `-t`, `--thing` | `<name>` | Device (thing) token — the `{device}` of every UNS topic. Falls back to `$GGCOMMONS_THING_NAME`; required (via one or the other). Takes the **full** string (guards the historical one-char truncation bug). |
+| `-t`, `--thing` | `<name>` | Device (thing) token — the `{device}` of every UNS topic. Falls back to `$EDGECOMMONS_THING_NAME`; required (via one or the other). Takes the **full** string (guards the historical one-char truncation bug). |
 | `-h`, `--help` | — | Usage. |
 
 Internally the runtime is built with the synthesized standard argv

@@ -7,11 +7,11 @@
 //! original site topic.
 //!
 //! (Section references are to `docs/platform/DESIGN-uns-bridge.md` in the
-//! ggcommons monorepo; the decision-register entry is **D-B9**.)
+//! edgecommons monorepo; the decision-register entry is **D-B9**.)
 //!
 //! ## Why (§2.4)
 //! A site-side requester (e.g. the console) sets
-//! `header.reply_to = ggcommons/reply-<uuid>` — an ephemeral topic **on the site
+//! `header.reply_to = edgecommons/reply-<uuid>` — an ephemeral topic **on the site
 //! broker**. Relayed verbatim, the device-side responder would `reply()` onto the
 //! device bus where nobody is subscribed. The bridge therefore proxies the reply
 //! path: rewrite going down, relay back going up.
@@ -21,7 +21,7 @@
 //!   when `header.reply_to` is present — a `cmd` without it is a
 //!   notification-style command (normative per the canonical doc §4.3) and relays
 //!   untouched, as do raw (non-envelope) commands, which carry no header at all.
-//! - The minted topic uses the core's standard `ggcommons/reply-` prefix
+//! - The minted topic uses the core's standard `edgecommons/reply-` prefix
 //!   ([`new_reply_topic`]), so it is structurally exempt from the reserved-class
 //!   guard (D-U6) and indistinguishable from any other reply topic to the
 //!   responder.
@@ -49,8 +49,8 @@
 
 use std::time::{Duration, Instant};
 
-use ggcommons::messaging::message::Message;
-use ggcommons::messaging::request_reply::new_reply_topic;
+use edgecommons::messaging::message::Message;
+use edgecommons::messaging::request_reply::new_reply_topic;
 
 use crate::relay::{DropReason, RelayEngine};
 
@@ -95,7 +95,7 @@ pub enum DownlinkRewrite {
     Rewritten {
         /// The re-serialized envelope carrying the rewritten `reply_to`.
         bytes: Vec<u8>,
-        /// The bridge-minted `ggcommons/reply-<uuid>` topic (the new map key).
+        /// The bridge-minted `edgecommons/reply-<uuid>` topic (the new map key).
         bridge_topic: String,
         /// The oldest entry's bridge topic, evicted because the map was at
         /// `maxPending` (§2.4 evict-oldest): expire it early — unsubscribe it and
@@ -300,11 +300,11 @@ pub fn prepare_reply(engine: &RelayEngine, payload: &[u8]) -> ReplyRelay {
 mod tests {
     use super::*;
     use crate::relay::{RelayEngine, DEFAULT_MAX_HOPS, RELAY_TAG};
-    use ggcommons::messaging::request_reply::REPLY_TOPIC_PREFIX;
-    use ggcommons::messaging::MessageBuilder;
+    use edgecommons::messaging::request_reply::REPLY_TOPIC_PREFIX;
+    use edgecommons::messaging::MessageBuilder;
     use serde_json::{json, Value};
 
-    const SITE_REPLY: &str = "ggcommons/reply-site-original";
+    const SITE_REPLY: &str = "edgecommons/reply-site-original";
     const HOP: &str = "gw-01/uns-bridge";
 
     fn correlator(ttl_secs: u64, max_pending: usize) -> ReplyCorrelator {
@@ -403,18 +403,18 @@ mod tests {
         let (_, bridge_topic, _) = rewritten(&mut c, Instant::now());
         assert!(c.take(&bridge_topic).is_some());
         assert_eq!(c.take(&bridge_topic), None, "a second reply is a stray");
-        assert_eq!(c.take("ggcommons/reply-never-recorded"), None);
+        assert_eq!(c.take("edgecommons/reply-never-recorded"), None);
     }
 
     #[test]
     fn distinct_requests_get_distinct_topics_resolving_to_their_own_site_topic() {
         let mut c = correlator(60, 1024);
         let now = Instant::now();
-        let (_, t1, _) = rewritten_for(&mut c, "ggcommons/reply-site-1", now);
-        let (_, t2, _) = rewritten_for(&mut c, "ggcommons/reply-site-2", now);
+        let (_, t1, _) = rewritten_for(&mut c, "edgecommons/reply-site-1", now);
+        let (_, t2, _) = rewritten_for(&mut c, "edgecommons/reply-site-2", now);
         assert_ne!(t1, t2);
-        assert_eq!(c.take(&t2), Some("ggcommons/reply-site-2".to_string()));
-        assert_eq!(c.take(&t1), Some("ggcommons/reply-site-1".to_string()));
+        assert_eq!(c.take(&t2), Some("edgecommons/reply-site-2".to_string()));
+        assert_eq!(c.take(&t1), Some("edgecommons/reply-site-1".to_string()));
     }
 
     // ---- maxPending: evict-oldest (§2.4 / D-B9) ----
@@ -423,11 +423,11 @@ mod tests {
     fn overflow_evicts_the_oldest_entry() {
         let mut c = correlator(60, 2);
         let now = Instant::now();
-        let (_, t1, e1) = rewritten_for(&mut c, "ggcommons/reply-site-1", now);
-        let (_, t2, e2) = rewritten_for(&mut c, "ggcommons/reply-site-2", now);
+        let (_, t1, e1) = rewritten_for(&mut c, "edgecommons/reply-site-1", now);
+        let (_, t2, e2) = rewritten_for(&mut c, "edgecommons/reply-site-2", now);
         assert!(e1.is_none() && e2.is_none());
 
-        let (_, t3, e3) = rewritten_for(&mut c, "ggcommons/reply-site-3", now);
+        let (_, t3, e3) = rewritten_for(&mut c, "edgecommons/reply-site-3", now);
         assert_eq!(e3, Some(t1.clone()), "the OLDEST entry is the eviction victim");
         assert_eq!(c.len(), 2, "the bound holds after eviction");
         assert_eq!(c.take(&t1), None, "the evicted entry is gone");
@@ -438,9 +438,9 @@ mod tests {
     fn max_pending_zero_is_treated_as_one() {
         let mut c = correlator(60, 0);
         let now = Instant::now();
-        let (_, t1, e1) = rewritten_for(&mut c, "ggcommons/reply-site-1", now);
+        let (_, t1, e1) = rewritten_for(&mut c, "edgecommons/reply-site-1", now);
         assert!(e1.is_none());
-        let (_, _t2, e2) = rewritten_for(&mut c, "ggcommons/reply-site-2", now);
+        let (_, _t2, e2) = rewritten_for(&mut c, "edgecommons/reply-site-2", now);
         assert_eq!(e2, Some(t1));
         assert_eq!(c.len(), 1);
     }
@@ -451,10 +451,10 @@ mod tests {
     fn sweep_expires_only_stale_entries_oldest_first() {
         let mut c = correlator(60, 1024);
         let t0 = Instant::now();
-        let (_, old1, _) = rewritten_for(&mut c, "ggcommons/reply-site-1", t0);
-        let (_, old2, _) = rewritten_for(&mut c, "ggcommons/reply-site-2", t0);
+        let (_, old1, _) = rewritten_for(&mut c, "edgecommons/reply-site-1", t0);
+        let (_, old2, _) = rewritten_for(&mut c, "edgecommons/reply-site-2", t0);
         let (_, young, _) =
-            rewritten_for(&mut c, "ggcommons/reply-site-3", t0 + Duration::from_secs(30));
+            rewritten_for(&mut c, "edgecommons/reply-site-3", t0 + Duration::from_secs(30));
 
         // Just before the first deadline: nothing expires.
         assert!(c.sweep(t0 + Duration::from_secs(59)).is_empty());
@@ -482,8 +482,8 @@ mod tests {
     fn drain_returns_every_topic_oldest_first() {
         let mut c = correlator(60, 1024);
         let now = Instant::now();
-        let (_, t1, _) = rewritten_for(&mut c, "ggcommons/reply-site-1", now);
-        let (_, t2, _) = rewritten_for(&mut c, "ggcommons/reply-site-2", now);
+        let (_, t1, _) = rewritten_for(&mut c, "edgecommons/reply-site-1", now);
+        let (_, t2, _) = rewritten_for(&mut c, "edgecommons/reply-site-2", now);
         assert_eq!(c.drain(), vec![t1, t2]);
         assert!(c.is_empty());
     }
@@ -506,7 +506,7 @@ mod tests {
             .uuid("00000000-0000-4000-8000-000000000002")
             .timestamp("2026-07-03T12:00:00Z")
             .correlation_id("corr-9")
-            .reply_to("ggcommons/reply-device-local") // atypical, but must be stripped
+            .reply_to("edgecommons/reply-device-local") // atypical, but must be stripped
             .build()
             .to_vec()
             .unwrap();

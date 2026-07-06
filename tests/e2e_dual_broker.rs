@@ -21,7 +21,7 @@
 //! two-broker rig (`tests/e2e/docker-compose.e2e.yml`), runs this test with
 //! `--ignored`, and tears the rig down.
 //!
-//! The test clients are the ggcommons core's own `MqttProvider` (the same
+//! The test clients are the edgecommons core's own `MqttProvider` (the same
 //! transport the bridge reuses for its site connection) — no extra MQTT
 //! dependency. Negative assertions (C, E) avoid pure sleeps by publishing an
 //! ordered **follower** through the same serial path and asserting the
@@ -32,9 +32,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ggcommons::messaging::config::MessagingConfig;
-use ggcommons::messaging::provider::mqtt::MqttProvider;
-use ggcommons::messaging::{Destination, MessageBuilder, MessagingProvider, Qos};
+use edgecommons::messaging::config::MessagingConfig;
+use edgecommons::messaging::provider::mqtt::MqttProvider;
+use edgecommons::messaging::{Destination, MessageBuilder, MessagingProvider, Qos};
 use serde_json::{json, Value};
 
 /// The device (thing) token the bridge runs as — matches the shipped sample
@@ -45,7 +45,7 @@ const HOP_ID: &str = "gw-01/uns-bridge";
 /// The reserved hop-tag key (`src/relay.rs::RELAY_TAG` — the §2.3 contract).
 const RELAY_TAG: &str = "_relay";
 /// The core's reply-topic prefix a bridge-minted reply topic must carry (§2.4).
-const REPLY_PREFIX: &str = "ggcommons/reply-";
+const REPLY_PREFIX: &str = "edgecommons/reply-";
 
 fn env_port(name: &str, default: u16) -> u16 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -281,7 +281,7 @@ async fn dual_emqx_bridge_level_relay() {
     let work_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("e2e");
     let config = write_e2e_config(&work_dir, device_port, site_port);
 
-    // Test clients: the ggcommons core MqttProvider against each broker.
+    // Test clients: the edgecommons core MqttProvider against each broker.
     let dev: Arc<dyn MessagingProvider> = connect_client(device_port, "e2e-dev-probe").await;
     let site: Arc<dyn MessagingProvider> = connect_client(site_port, "e2e-site-probe").await;
 
@@ -290,7 +290,7 @@ async fn dual_emqx_bridge_level_relay() {
     let dev_cmd = Recorder::start(&dev, "ecv1/+/+/+/cmd/#", 64).await;
     let dev_state = Recorder::start(&dev, &format!("ecv1/{DEVICE}/uns-bridge/main/state"), 64).await;
     let dev_metric = Recorder::start(&dev, &format!("ecv1/{DEVICE}/uns-bridge/main/metric/#"), 256).await;
-    let site_reply = Recorder::start(&site, "ggcommons/reply-e2e-original", 8).await;
+    let site_reply = Recorder::start(&site, "edgecommons/reply-e2e-original", 8).await;
 
     // The bridge under test — the real binary, real config file, real brokers.
     let started = Instant::now();
@@ -448,7 +448,7 @@ async fn dual_emqx_bridge_level_relay() {
     let d_cmd = MessageBuilder::new("ping", "1.0")
         .payload(json!({ "marker": "e2e-D" }))
         .correlation_id("corr-e2e-D")
-        .reply_to("ggcommons/reply-e2e-original")
+        .reply_to("edgecommons/reply-e2e-original")
         .build()
         .to_vec()
         .expect("D cmd envelope");
@@ -460,7 +460,7 @@ async fn dual_emqx_bridge_level_relay() {
             let bridge_topic = v["header"]["reply_to"].as_str().unwrap_or_default().to_string();
             if !bridge_topic.starts_with(REPLY_PREFIX) {
                 Err(format!("reply_to not rewritten to a bridge topic: '{bridge_topic}'"))
-            } else if bridge_topic == "ggcommons/reply-e2e-original" {
+            } else if bridge_topic == "edgecommons/reply-e2e-original" {
                 Err("reply_to NOT rewritten — the site reply topic leaked down".into())
             } else {
                 // Fake device-side responder: reply on the bridge-minted topic,
@@ -474,7 +474,7 @@ async fn dual_emqx_bridge_level_relay() {
                 dev.publish(&bridge_topic, reply, Destination::Local, Qos::AtLeastOnce)
                     .await
                     .expect("D reply publish");
-                match site_reply.await_topic("ggcommons/reply-e2e-original", wait).await {
+                match site_reply.await_topic("edgecommons/reply-e2e-original", wait).await {
                     None => Err("the reply never returned to the original site reply topic".into()),
                     Some(bytes) => {
                         let v = parse(&bytes);

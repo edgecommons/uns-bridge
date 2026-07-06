@@ -1,40 +1,86 @@
 {
-  "hierarchy": { "levels": ["site", "device"] },
-  "identity": { "site": "dallas" },
-
+  "hierarchy": {
+    "levels": [
+      "site",
+      "device"
+    ]
+  },
+  "identity": {
+    "site": "dallas"
+  },
   "messaging": {
-    "local": { "host": "localhost", "port": 1883, "clientId": "uns-bridge-local" },
+    "local": {
+      "host": "localhost",
+      "port": 1883,
+      "clientId": "uns-bridge-local"
+    },
     "requestTimeoutSeconds": 30
   },
-
-  "heartbeat": { "enabled": true, "intervalSecs": 5 },
-  "metricEmission": { "target": "messaging" },
-
+  "heartbeat": {
+    "enabled": true,
+    "intervalSecs": 5
+  },
+  "metricEmission": {
+    "target": "messaging"
+  },
   "component": {
     "instances": [
       {
         "id": "site",
-        "siteBroker": { "host": "localhost", "port": 1884, "clientId": "uns-bridge-site" },
+        "siteBroker": {
+          "host": "localhost",
+          "port": 1884,
+          "clientId": "uns-bridge-site"
+        },
         "lwt": {
           "topic": "ecv1/gw-01/uns-bridge/main/state",
-          "payload": { "status": "UNREACHABLE" },
+          "payload": {
+            "status": "UNREACHABLE"
+          },
           "qos": 1
         },
         "uplink": {
           "classes": {
-            "state": { "enabled": true },
-            "cfg": { "enabled": true },
-            "evt": { "enabled": true, "bufferWhileDisconnected": { "maxMessages": 1000 } },
-            "metric": { "enabled": true, "maxRatePerSec": 50 },
-            "data": { "enabled": true, "maxRatePerSec": 200, "burst": 400 },
-            "log": { "enabled": false },
-            "app": { "enabled": false }
+            "state": {
+              "enabled": true
+            },
+            "cfg": {
+              "enabled": true
+            },
+            "evt": {
+              "enabled": true,
+              "bufferWhileDisconnected": {
+                "maxMessages": 1000
+              }
+            },
+            "metric": {
+              "enabled": true,
+              "maxRatePerSec": 50
+            },
+            "data": {
+              "enabled": true,
+              "maxRatePerSec": 200,
+              "burst": 400
+            },
+            "log": {
+              "enabled": false
+            },
+            "app": {
+              "enabled": false
+            }
           }
         },
-        "reply": { "ttlSecs": 60, "maxPending": 1024 },
+        "reply": {
+          "ttlSecs": 60,
+          "maxPending": 1024
+        },
         "maxHops": 4,
-        "queue": { "data": 512, "default": 64 }
+        "queue": {
+          "data": 512,
+          "default": 64
+        }
       }
-    ]
+    ],
+    "token": "uns-bridge"
   }
 }
