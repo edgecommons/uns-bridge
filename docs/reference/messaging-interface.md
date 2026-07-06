@@ -81,7 +81,7 @@ OBSERVABILITY connection), which then rides its own uplink to the site:
 
 | Topic | Class | Cadence | What |
 |-------|-------|---------|------|
-| `ecv1/{device}/uns-bridge/main/state` | `state` | ~5 s (heartbeat) | The bridge's liveness keepalive. The **site LWT** publishes `UNREACHABLE` here on abrupt death. |
+| `ecv1/{device}/uns-bridge/main/state` | `state` | ~5 s (heartbeat) | The bridge's liveness keepalive. The private derived **site LWT** publishes `UNREACHABLE` here on abrupt death. |
 | `ecv1/{device}/uns-bridge/main/cfg` | `cfg` | on start / change | The bridge's effective (redacted) config. |
 | `ecv1/{device}/uns-bridge/main/metric/<name>` | `metric` | 30 s | The relay counters/gauges (below). |
 | `ecv1/{device}/_bcast/main/cmd/republish-state` · `…/republish-cfg` | `cmd` | site-reconnect rising edge | The rehydration broadcasts, on the **device bus** only (best-effort; device components answer via the library's `RepublishListener`). |
@@ -153,8 +153,8 @@ ACL-enforcing site broker.
 ## Startup, shutdown, and reconnection behavior
 
 - **Startup order:** edgecommons runtime (device bus, fatal if down) → relay's raw device-bus connection (fatal
-  if down) → LWT template-resolve + cross-check (advisory WARN) → site connect (retried forever, ~5 s between
-  tries; abandonable by a shutdown signal) → subscribe all filters → `relay running`.
+  if down) → derive the private site LWT topic from the bridge state topic → site connect (retried forever,
+  ~5 s between tries; abandonable by a shutdown signal) → subscribe all filters → `relay running`.
 - **Intermittent uplink:** the site connect retries in the bridge's own loop; the provider re-subscribes every
   filter on each reconnect, so recovery is transparent. A dead **device** bus is fatal (the bridge is useless
   without it); a dead **site** bus is not.

@@ -14,6 +14,7 @@
 //! | E  | loop protection (§2.3): an envelope already carrying the bridge's own hop id is dropped, never re-relayed |
 //! | F1 | the bridge's own heartbeat `state` keepalive appears on the DEVICE bus (§2.8 / P3-4b) |
 //! | F2 | the bridge's relay `metric`s appear on the DEVICE bus (first 30 s emission tick) |
+//! | G  | forced bridge death publishes the derived site LWT `{"status":"UNREACHABLE"}` on the bridge's own state topic |
 //!
 //! **Gated twice**: `#[ignore]` so a plain `cargo test` never touches it, plus
 //! the `UNS_BRIDGE_E2E=1` env var so even `--include-ignored` sweeps skip it
@@ -37,8 +38,8 @@ use edgecommons::messaging::provider::mqtt::MqttProvider;
 use edgecommons::messaging::{Destination, MessageBuilder, MessagingProvider, Qos};
 use serde_json::{json, Value};
 
-/// The device (thing) token the bridge runs as — matches the shipped sample
-/// config's LWT topic (`test-configs/config.json`).
+/// The device (thing) token the bridge runs as — drives the bridge's own UNS
+/// state topic and derived site Last-Will topic.
 const DEVICE: &str = "gw-01";
 /// The bridge's §2.3 hop identifier: `{device}/{component}`.
 const HOP_ID: &str = "gw-01/uns-bridge";
@@ -48,7 +49,10 @@ const RELAY_TAG: &str = "_relay";
 const REPLY_PREFIX: &str = "edgecommons/reply-";
 
 fn env_port(name: &str, default: u16) -> u16 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Build one plaintext test-client config (the core `MessagingConfig` shape).
@@ -115,10 +119,24 @@ impl Recorder {
 
     /// Distinct topics recorded so far (diagnostics).
     fn topics(&self) -> Vec<String> {
-        let mut topics: Vec<String> =
-            self.seen.lock().expect("recorder lock").iter().map(|(t, _)| t.clone()).collect();
+        let mut topics: Vec<String> = self
+            .seen
+            .lock()
+            .expect("recorder lock")
+            .iter()
+            .map(|(t, _)| t.clone())
+            .collect();
         topics.dedup();
         topics
+    }
+
+    fn count_on_topic(&self, topic: &str) -> usize {
+        self.seen
+            .lock()
+            .expect("recorder lock")
+            .iter()
+            .filter(|(t, _)| t == topic)
+            .count()
     }
 
     /// Await the first payload on exactly `topic`, up to `timeout`.
@@ -127,6 +145,33 @@ impl Recorder {
         loop {
             if let Some(p) = self.on_topic(topic).into_iter().next() {
                 return Some(p);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn await_topic_match_after(
+        &self,
+        topic: &str,
+        after: usize,
+        pred: impl Fn(&[u8]) -> bool,
+        timeout: Duration,
+    ) -> Option<Vec<u8>> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let seen = self.seen.lock().expect("recorder lock");
+                if let Some((_, payload)) = seen
+                    .iter()
+                    .filter(|(t, _)| t == topic)
+                    .skip(after)
+                    .find(|(_, payload)| pred(payload))
+                {
+                    return Some(payload.clone());
+                }
             }
             if Instant::now() >= deadline {
                 return None;
@@ -172,16 +217,24 @@ impl Bridge {
             .arg(config)
             .arg("--thing")
             .arg(DEVICE)
-            .stdout(Stdio::from(log_file.try_clone().expect("cloning the log handle")))
+            .stdout(Stdio::from(
+                log_file.try_clone().expect("cloning the log handle"),
+            ))
             .stderr(Stdio::from(log_file))
             .spawn()
             .expect("spawning the uns-bridge binary");
-        Bridge { child, log: log.to_path_buf() }
+        Bridge {
+            child,
+            log: log.to_path_buf(),
+        }
     }
 
     /// `Some(status)` when the bridge already exited (it must not).
     fn exited(&mut self) -> Option<String> {
-        self.child.try_wait().expect("try_wait").map(|s| s.to_string())
+        self.child
+            .try_wait()
+            .expect("try_wait")
+            .map(|s| s.to_string())
     }
 
     fn log_tail(&self) -> String {
@@ -190,12 +243,16 @@ impl Bridge {
         let start = lines.len().saturating_sub(60);
         lines[start..].join("\n")
     }
+
+    fn kill_and_wait(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl Drop for Bridge {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.kill_and_wait();
     }
 }
 
@@ -211,13 +268,20 @@ fn write_e2e_config(dir: &Path, device_port: u16, site_port: u16) -> PathBuf {
     cfg["component"]["instances"][0]["siteBroker"]["clientId"] = json!("uns-bridge-e2e-site");
     std::fs::create_dir_all(dir).expect("creating the e2e work dir");
     let path = dir.join("config.e2e.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&cfg).expect("serializing"))
-        .expect("writing the e2e config");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&cfg).expect("serializing"),
+    )
+    .expect("writing the e2e config");
     path
 }
 
 fn envelope(msg_type: &str, body: Value) -> Vec<u8> {
-    MessageBuilder::new(msg_type, "1.0").payload(body).build().to_vec().expect("envelope")
+    MessageBuilder::new(msg_type, "1.0")
+        .payload(body)
+        .build()
+        .to_vec()
+        .expect("envelope")
 }
 
 fn parse(bytes: &[u8]) -> Value {
@@ -229,7 +293,10 @@ fn assert_own_hop(v: &Value) -> Result<(), String> {
     if v["tags"][RELAY_TAG] == json!([HOP_ID]) {
         Ok(())
     } else {
-        Err(format!("hop tag wrong: tags.{RELAY_TAG} = {}", v["tags"][RELAY_TAG]))
+        Err(format!(
+            "hop tag wrong: tags.{RELAY_TAG} = {}",
+            v["tags"][RELAY_TAG]
+        ))
     }
 }
 
@@ -255,7 +322,11 @@ impl Checks {
             self.0.len()
         );
         if !failed.is_empty() {
-            println!("\n-- bridge log tail ({}) --\n{}", bridge.log.display(), bridge.log_tail());
+            println!(
+                "\n-- bridge log tail ({}) --\n{}",
+                bridge.log.display(),
+                bridge.log_tail()
+            );
             panic!(
                 "{} of {} e2e assertions failed: {:?}",
                 failed.len(),
@@ -278,7 +349,9 @@ async fn dual_emqx_bridge_level_relay() {
     }
     let device_port = env_port("E2E_DEVICE_PORT", 21883);
     let site_port = env_port("E2E_SITE_PORT", 21884);
-    let work_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("e2e");
+    let work_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("e2e");
     let config = write_e2e_config(&work_dir, device_port, site_port);
 
     // Test clients: the edgecommons core MqttProvider against each broker.
@@ -288,8 +361,14 @@ async fn dual_emqx_bridge_level_relay() {
     // Recorders BEFORE the bridge starts, so nothing can race past them.
     let site_all = Recorder::start(&site, "ecv1/#", 512).await;
     let dev_cmd = Recorder::start(&dev, "ecv1/+/+/+/cmd/#", 64).await;
-    let dev_state = Recorder::start(&dev, &format!("ecv1/{DEVICE}/uns-bridge/main/state"), 64).await;
-    let dev_metric = Recorder::start(&dev, &format!("ecv1/{DEVICE}/uns-bridge/main/metric/#"), 256).await;
+    let dev_state =
+        Recorder::start(&dev, &format!("ecv1/{DEVICE}/uns-bridge/main/state"), 64).await;
+    let dev_metric = Recorder::start(
+        &dev,
+        &format!("ecv1/{DEVICE}/uns-bridge/main/metric/#"),
+        256,
+    )
+    .await;
     let site_reply = Recorder::start(&site, "edgecommons/reply-e2e-original", 8).await;
 
     // The bridge under test — the real binary, real config file, real brokers.
@@ -306,7 +385,11 @@ async fn dual_emqx_bridge_level_relay() {
     let own_state_topic = format!("ecv1/{DEVICE}/uns-bridge/main/state");
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if site_all.await_topic(&own_state_topic, Duration::from_secs(1)).await.is_some() {
+        if site_all
+            .await_topic(&own_state_topic, Duration::from_secs(1))
+            .await
+            .is_some()
+        {
             break;
         }
         if let Some(status) = bridge.exited() {
@@ -320,7 +403,10 @@ async fn dual_emqx_bridge_level_relay() {
             bridge.log_tail()
         );
     }
-    println!("bridge ready after {:?} (own state relayed to the site broker)", started.elapsed());
+    println!(
+        "bridge ready after {:?} (own state relayed to the site broker)",
+        started.elapsed()
+    );
 
     let mut checks = Checks(Vec::new());
     let wait = Duration::from_secs(10);
@@ -353,7 +439,10 @@ async fn dual_emqx_bridge_level_relay() {
     let a2_topic = format!("ecv1/{DEVICE}/e2e-comp/main/evt/alarms/high");
     dev.publish(
         &a2_topic,
-        envelope("alarm-raised", json!({ "severity": "high", "marker": "e2e-A2" })),
+        envelope(
+            "alarm-raised",
+            json!({ "severity": "high", "marker": "e2e-A2" }),
+        ),
         Destination::Local,
         Qos::AtLeastOnce,
     )
@@ -377,9 +466,14 @@ async fn dual_emqx_bridge_level_relay() {
     let a3_topic = format!("ecv1/{DEVICE}/e2e-comp/main/data/temp");
     let a3_raw = serde_json::to_vec(&json!({ "temperature": 21.5, "marker": "e2e-A3" }))
         .expect("A3 payload");
-    dev.publish(&a3_topic, a3_raw.clone(), Destination::Local, Qos::AtLeastOnce)
-        .await
-        .expect("A3 publish");
+    dev.publish(
+        &a3_topic,
+        a3_raw.clone(),
+        Destination::Local,
+        Qos::AtLeastOnce,
+    )
+    .await
+    .expect("A3 publish");
     checks.record(
         "A3 uplink raw data — byte-verbatim",
         match site_all.await_topic(&a3_topic, wait).await {
@@ -419,19 +513,31 @@ async fn dual_emqx_bridge_level_relay() {
 
     // ---- C: a cmd for ANOTHER device must not cross ----
     let c_topic = "ecv1/gw-99/e2e-comp/main/cmd/do-thing";
-    site.publish(c_topic, envelope("do-thing", json!({})), Destination::Local, Qos::AtLeastOnce)
-        .await
-        .expect("C publish");
+    site.publish(
+        c_topic,
+        envelope("do-thing", json!({})),
+        Destination::Local,
+        Qos::AtLeastOnce,
+    )
+    .await
+    .expect("C publish");
     // Ordered follower: once a LATER own-device cmd crossed, the gw-99 cmd had
     // every chance it will ever get.
     let c_follower = format!("ecv1/{DEVICE}/e2e-comp/main/cmd/after-c");
-    site.publish(&c_follower, envelope("after-c", json!({})), Destination::Local, Qos::AtLeastOnce)
-        .await
-        .expect("C follower publish");
+    site.publish(
+        &c_follower,
+        envelope("after-c", json!({})),
+        Destination::Local,
+        Qos::AtLeastOnce,
+    )
+    .await
+    .expect("C follower publish");
     checks.record(
         "C  non-own-device cmd NOT relayed (own-device pinning)",
         match dev_cmd.await_topic(&c_follower, wait).await {
-            None => Err("the own-device follower cmd never arrived — cannot prove the negative".into()),
+            None => {
+                Err("the own-device follower cmd never arrived — cannot prove the negative".into())
+            }
             Some(_) => {
                 tokio::time::sleep(Duration::from_millis(750)).await; // grace
                 if dev_cmd.on_topic(c_topic).is_empty() {
@@ -452,14 +558,21 @@ async fn dual_emqx_bridge_level_relay() {
         .build()
         .to_vec()
         .expect("D cmd envelope");
-    site.publish(&d_topic, d_cmd, Destination::Local, Qos::AtLeastOnce).await.expect("D publish");
+    site.publish(&d_topic, d_cmd, Destination::Local, Qos::AtLeastOnce)
+        .await
+        .expect("D publish");
     let d_result = match dev_cmd.await_topic(&d_topic, wait).await {
         None => Err("the request cmd never arrived on the device bus".into()),
         Some(bytes) => {
             let v = parse(&bytes);
-            let bridge_topic = v["header"]["reply_to"].as_str().unwrap_or_default().to_string();
+            let bridge_topic = v["header"]["reply_to"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             if !bridge_topic.starts_with(REPLY_PREFIX) {
-                Err(format!("reply_to not rewritten to a bridge topic: '{bridge_topic}'"))
+                Err(format!(
+                    "reply_to not rewritten to a bridge topic: '{bridge_topic}'"
+                ))
             } else if bridge_topic == "edgecommons/reply-e2e-original" {
                 Err("reply_to NOT rewritten — the site reply topic leaked down".into())
             } else {
@@ -474,7 +587,10 @@ async fn dual_emqx_bridge_level_relay() {
                 dev.publish(&bridge_topic, reply, Destination::Local, Qos::AtLeastOnce)
                     .await
                     .expect("D reply publish");
-                match site_reply.await_topic("edgecommons/reply-e2e-original", wait).await {
+                match site_reply
+                    .await_topic("edgecommons/reply-e2e-original", wait)
+                    .await
+                {
                     None => Err("the reply never returned to the original site reply topic".into()),
                     Some(bytes) => {
                         let v = parse(&bytes);
@@ -508,7 +624,9 @@ async fn dual_emqx_bridge_level_relay() {
         .build()
         .to_vec()
         .expect("E stamped envelope");
-    dev.publish(&e_topic, stamped, Destination::Local, Qos::AtLeastOnce).await.expect("E publish");
+    dev.publish(&e_topic, stamped, Destination::Local, Qos::AtLeastOnce)
+        .await
+        .expect("E publish");
     // Ordered follower through the SAME serial state pump: once it crossed, the
     // stamped envelope was already decided (and must have been dropped).
     let e_follower = format!("ecv1/{DEVICE}/e2e-after-loop/main/state");
@@ -538,12 +656,16 @@ async fn dual_emqx_bridge_level_relay() {
     // ---- F: the bridge's own observability on the DEVICE bus (§2.8) ----
     checks.record(
         "F1 bridge state keepalive on the device bus",
-        match dev_state.await_topic(&own_state_topic, Duration::from_secs(12)).await {
+        match dev_state
+            .await_topic(&own_state_topic, Duration::from_secs(12))
+            .await
+        {
             None => Err("no heartbeat state keepalive seen on the device bus".into()),
             Some(bytes) if parse(&bytes)["header"].is_object() => Ok(()),
-            Some(bytes) => {
-                Err(format!("keepalive is not an envelope: {}", String::from_utf8_lossy(&bytes)))
-            }
+            Some(bytes) => Err(format!(
+                "keepalive is not an envelope: {}",
+                String::from_utf8_lossy(&bytes)
+            )),
         },
     );
 
@@ -554,8 +676,10 @@ async fn dual_emqx_bridge_level_relay() {
     // P3-4b relay counters specifically.)
     let metric_budget = Duration::from_secs(75).saturating_sub(started.elapsed());
     let metric_prefix = format!("ecv1/{DEVICE}/uns-bridge/main/metric/");
-    let is_relay_metric =
-        |t: &str| t.strip_prefix(metric_prefix.as_str()).is_some_and(|n| n.starts_with("relay"));
+    let is_relay_metric = |t: &str| {
+        t.strip_prefix(metric_prefix.as_str())
+            .is_some_and(|n| n.starts_with("relay"))
+    };
     checks.record(
         "F2 relay-counter metric on the device bus (30 s emission tick)",
         match dev_metric.await_match(is_relay_metric, metric_budget).await {
@@ -582,5 +706,22 @@ async fn dual_emqx_bridge_level_relay() {
         println!("-- bridge log tail --\n{}", bridge.log_tail());
         panic!("bridge exited mid-test ({status})");
     }
+    let lwt_seen_before_kill = site_all.count_on_topic(&own_state_topic);
+    bridge.kill_and_wait();
+    checks.record(
+        "G  derived site LWT — forced bridge death publishes UNREACHABLE on own state topic",
+        match site_all
+            .await_topic_match_after(
+                &own_state_topic,
+                lwt_seen_before_kill,
+                |bytes| parse(bytes) == json!({ "status": "UNREACHABLE" }),
+                Duration::from_secs(15),
+            )
+            .await
+        {
+            Some(_) => Ok(()),
+            None => Err("site broker did not publish the derived UNREACHABLE LWT".into()),
+        },
+    );
     checks.finish(&bridge);
 }

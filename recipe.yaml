@@ -1,13 +1,13 @@
 ---
-# PACKAGING STUB (P3-2). The GREENGRASS deployment of the bridge runs the binary against the
-# Nucleus; note the PRIMARY = IPC variant of the relay is a documented follow-up — this recipe
-# currently assumes a device-local MQTT broker as the primary (HOST-style config via GG_CONFIG).
+# PACKAGING STUB (P3-2). The GREENGRASS deployment of the bridge currently runs the binary in
+# HOST/MQTT shape against a device-local MQTT broker; the PRIMARY = IPC variant of the relay is a
+# documented follow-up.
 # The site-broker half landed in P3-5 (deploy/site-broker/); the remaining packaging wiring is
 # a release-time item (README "Remaining release-time items").
 RecipeFormatVersion: "2020-01-25"
 ComponentName: "com.mbreissi.edgecommons.UnsBridge"
 ComponentVersion: "1.0.0"
-ComponentDescription: "UNS bridge: one per device bus — an envelope-aware relay between the device-local bus and the site UNS broker (uplinks the six UNS classes topic-verbatim, downlinks own-device commands, hop-tag loop protection, site-connection LWT)."
+ComponentDescription: "UNS bridge: one per device bus — an envelope-aware relay between the device-local bus and the site UNS broker (uplinks the six UNS classes topic-verbatim, downlinks own-device commands, hop-tag loop protection, derived site-connection LWT)."
 ComponentPublisher: "Marc Breissinger"
 ComponentConfiguration:
   DefaultConfiguration:
@@ -31,11 +31,6 @@ ComponentConfiguration:
                 certPath: "/greengrass/v2/work/{ComponentFullName}/certs/client.pem"
                 keyPath: "/greengrass/v2/work/{ComponentFullName}/certs/client.key"
                 caPath: "/greengrass/v2/work/{ComponentFullName}/certs/ca.pem"
-            lwt:
-              topic: "ecv1/{ThingName}/uns-bridge/main/state"
-              payload:
-                status: "UNREACHABLE"
-              qos: 1
             uplink:
               classes:
                 app:

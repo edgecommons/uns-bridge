@@ -12,8 +12,8 @@ it has its own identity, heartbeat, config announce, and metrics, all of which r
 Unlike a dumb broker-to-broker bridge it understands the message envelope: it stamps a **hop tag** for
 loop protection, **rewrites `reply_to`** so site→device request/reply survives the crossing, applies a
 **per-class uplink policy** (enable/disable, token-bucket rate caps, and a bounded event replay buffer
-for WAN blips), and registers a Last-Will `UNREACHABLE` on the site connection for fast whole-device
-reachability detection.
+for WAN blips), and derives a private site Last-Will `UNREACHABLE` for fast whole-device reachability
+detection.
 
 | Doc | Start here when you want to… |
 |-----|------------------------------|
@@ -38,7 +38,7 @@ one raw one for the relay) and one to the site broker — and pumps messages acr
 matrix**: six UNS classes go **up** (device → site) topic-verbatim, `cmd` comes **down** (site → device)
 pinned to this bridge's own device, and request/reply is proxied through a TTL'd correlation map.
 Everything else is policy on top of that: loop protection, rate limiting, disconnect buffering, and a
-Last-Will for reachability.
+derived Last-Will for reachability.
 
 ## Audience
 

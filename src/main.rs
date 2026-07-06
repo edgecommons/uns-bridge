@@ -33,12 +33,11 @@
 //!
 //! - **SITE** connection = the bridge's external system, declared in its own
 //!   `component.instances[]` "site" entry and built by **reusing the edgecommons
-//!   core's already-pub MQTT objects** (`MqttProvider::connect(&site_cfg)`) —
-//!   ZERO core change (§1.1). The site connect is retried in the bridge's own
-//!   loop (non-fatal uplink, §1.4); the provider re-subscribes every filter on
-//!   each CONNACK, so reconnection is transparent. Its `lwt.topic` is
-//!   template-resolved and cross-checked (WARN on mismatch) against the bridge's
-//!   real state topic at startup (§2.6/§3.7, D-B11 — advisory).
+//!   core's MQTT provider** (`MqttProvider::connect_with_last_will`). The site
+//!   Last-Will is a private bridge-console contract derived from the bridge's
+//!   canonical UNS state topic, not user config. The site connect is retried in
+//!   the bridge's own loop (non-fatal uplink, §1.4); the provider re-subscribes
+//!   every filter on each CONNACK, so reconnection is transparent.
 //!
 //! ## Run locally (HOST, device broker :1883 + site broker :1884)
 //! ```bash
@@ -50,8 +49,7 @@
 //!   MQTT↔MQTT pair.
 //! - The standard `-c`/`--platform`/`--transport` CLI contract (today the bridge's
 //!   minimal `--config`/`--thing` CLI synthesizes the standard argv internally)
-//!   and template substitution across the whole `instances[]` entry (today only
-//!   the site `lwt.topic` is resolved).
+//!   and template substitution across the whole `instances[]` entry.
 //! - The device-side `republish-state`/`republish-cfg` listener (a 4-language
 //!   edgecommons library slice) — until it lands, the reconnect rehydration
 //!   broadcast is inert.
@@ -68,8 +66,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use edgecommons::messaging::config::MessagingConfig;
-use edgecommons::messaging::provider::mqtt::MqttProvider;
-use edgecommons::messaging::MessagingProvider;
+use edgecommons::messaging::provider::mqtt::{MqttLastWill, MqttProvider};
+use edgecommons::messaging::{MessagingProvider, Qos};
 use edgecommons::uns::UnsClass;
 use edgecommons::EdgeCommonsBuilder;
 
@@ -88,6 +86,7 @@ const COMPONENT_NAME: &str = "com.mbreissi.edgecommons.UnsBridge";
 
 /// Delay between site-broker connect attempts (§1.4 — bridge-owned retry loop).
 const SITE_RETRY_DELAY: Duration = Duration::from_secs(5);
+const SITE_UNREACHABLE_LWT_PAYLOAD: &[u8] = br#"{"status":"UNREACHABLE"}"#;
 
 /// Minimal bridge arguments. The standard edgecommons CLI contract is synthesized
 /// from these for the runtime build (full contract = a documented follow-up).
@@ -126,17 +125,24 @@ fn parse_args() -> anyhow::Result<Args> {
     // Standard identity chain, minimally: -t ▸ platform env. (Full chain with the
     // facade integration.)
     let thing = thing
-        .or_else(|| std::env::var("EDGECOMMONS_THING_NAME").ok().filter(|v| !v.is_empty()))
+        .or_else(|| {
+            std::env::var("EDGECOMMONS_THING_NAME")
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
         .context("device identity required: pass -t/--thing or set EDGECOMMONS_THING_NAME")?;
     Ok(Args { config_path, thing })
 }
 
 /// §1.4: the uplink is intermittent by design — the bridge must come up and serve
 /// the device bus while the WAN is down, so the site connect retries forever in
-/// the bridge's own loop (`MqttProvider::connect` itself blocks ≤ 10 s per try).
-async fn connect_site_with_retry(site_cfg: &MessagingConfig) -> Arc<MqttProvider> {
+/// the bridge's own loop (`MqttProvider::connect_with_last_will` itself blocks ≤ 10 s per try).
+async fn connect_site_with_retry(
+    site_cfg: &MessagingConfig,
+    site_last_will: &MqttLastWill,
+) -> Arc<MqttProvider> {
     loop {
-        match MqttProvider::connect(site_cfg).await {
+        match MqttProvider::connect_with_last_will(site_cfg, Some(site_last_will)).await {
             Ok(provider) => {
                 tracing::info!("site-broker connection established");
                 return Arc::new(provider);
@@ -146,6 +152,14 @@ async fn connect_site_with_retry(site_cfg: &MessagingConfig) -> Arc<MqttProvider
                 tokio::time::sleep(SITE_RETRY_DELAY).await;
             }
         }
+    }
+}
+
+fn site_unreachable_last_will(topic: String) -> MqttLastWill {
+    MqttLastWill {
+        topic,
+        payload: SITE_UNREACHABLE_LWT_PAYLOAD.to_vec(),
+        qos: Qos::AtLeastOnce,
     }
 }
 
@@ -203,35 +217,29 @@ async fn main() -> anyhow::Result<()> {
     // guard in the path); see the module docs for why it cannot share the
     // runtime's connection without a (deliberately unmade) edgecommons change.
     let primary: Arc<dyn MessagingProvider> = Arc::new(
-        MqttProvider::connect(&cfg.relay_primary_messaging()).await.context(
-            "connecting the relay's device-bus (PRIMARY) connection — is the local broker up?",
-        )?,
+        MqttProvider::connect(&cfg.relay_primary_messaging())
+            .await
+            .context(
+                "connecting the relay's device-bus (PRIMARY) connection — is the local broker up?",
+            )?,
     );
     tracing::info!("relay device-bus connection established");
 
-    // SITE config: resolve config templates ({ThingName}, …) in the LWT topic —
-    // the load-bearing template case (§1.2) — then run the §2.6/§3.7 D-B11
-    // ADVISORY startup cross-check: the configured site LWT topic must equal the
-    // bridge's REAL state topic (what the heartbeat keepalive publishes on).
-    // Mismatch = WARN, never a failure — config stays authoritative.
-    let mut site_cfg = site_entry.site_messaging()?;
-    if let Some(lwt) = site_cfg.messaging.lwt.as_mut() {
-        lwt.topic = edgecommons::config::template::resolve(&gg.config(), &lwt.topic);
-    }
-    match gg.uns().topic(UnsClass::State) {
-        Ok(expected) => observability::log_lwt_cross_check(&observability::check_lwt_topic(
-            site_cfg.messaging.lwt.as_ref().map(|l| l.topic.as_str()),
-            &expected,
-        )),
-        Err(e) => {
-            tracing::warn!(error = %e, "LWT cross-check skipped: could not derive the bridge state topic")
-        }
-    }
+    let site_cfg = site_entry.site_messaging()?;
+    let site_lwt_topic = gg
+        .uns()
+        .topic(UnsClass::State)
+        .context("deriving the private site LWT topic from the bridge state topic")?;
+    let site_last_will = site_unreachable_last_will(site_lwt_topic.clone());
+    tracing::info!(
+        topic = %site_lwt_topic,
+        "site Last-Will derived from bridge state topic for console reachability"
+    );
 
     // SITE: the reused core MqttProvider over the bridge's own instances[] entry
     // (§1.1) — retried, and abandonable by a shutdown signal while still trying.
     let site: Arc<dyn MessagingProvider> = tokio::select! {
-        provider = connect_site_with_retry(&site_cfg) => provider,
+        provider = connect_site_with_retry(&site_cfg, &site_last_will) => provider,
         _ = gg.shutdown_signal() => {
             tracing::info!("shutdown before the site broker became reachable; exiting");
             return Ok(());
@@ -249,7 +257,10 @@ async fn main() -> anyhow::Result<()> {
         &site_entry.queue,
         &site_entry.reply,
         &site_entry.uplink,
-        Some(io::ObservabilityHook { metrics: gg.metrics(), config: gg.config() }),
+        Some(io::ObservabilityHook {
+            metrics: gg.metrics(),
+            config: gg.config(),
+        }),
     )
     .await?;
     tracing::info!("relay running");

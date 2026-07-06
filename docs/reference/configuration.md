@@ -22,7 +22,7 @@ argv (`--platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`) inter
 | `messaging` | **yes** | The **device-local** bus (the runtime's OBSERVABILITY connection *and*, with `-relay` appended to the client id, the relay's PRIMARY connection). Also the request-deadline knob. |
 | `component` | **yes** | Carries `instances[]`; the entry with a `siteBroker` declares the **site** broker and all relay knobs. |
 | `hierarchy` | optional | UNS enterprise-hierarchy level names; the last level is the device. Absent ⇒ `["device"]`. |
-| `identity` | optional | Values for every hierarchy level except the last (the resolved thing name). Together with `hierarchy` these set the bridge's own `identity` and its real `state` topic (which the LWT cross-check compares against). |
+| `identity` | optional | Values for every hierarchy level except the last (the resolved thing name). Together with `hierarchy` these set the bridge's own `identity`, its real `state` topic, and the private site LWT topic derived from it. |
 | `heartbeat` | optional | The bridge's own `state` keepalive (`{enabled, intervalSecs}`; on by default, 5 s). |
 | `metricEmission` | optional | Routes the relay counters (`target: messaging` publishes them on the UNS `metric` class — the sample setting). |
 | `logging` | optional | Standard edgecommons logging (console `info` by default). |
@@ -44,7 +44,6 @@ The standard edgecommons `messaging` section. Only the fields the bridge relies 
 |-----|------|---------|-----------|
 | `local` | object | **required** | The device broker: `host`, `port`, `clientId` (+ `credentials`/TLS as any edgecommons broker). The runtime connects with the configured `clientId`; the relay connects with `clientId + "-relay"`. |
 | `requestTimeoutSeconds` | number | `30` | The framework request-deadline. **Paired** with `reply.ttlSecs` — see below. |
-| `lwt` | object | — | A device-bus Last-Will, if any, belongs to the **runtime** connection; the relay connection always strips it (the will must never be registered twice). The bridge's *load-bearing* LWT is the **site** LWT (`instances[site].lwt`), not this one. |
 
 ## `component.instances[]` — the site entry
 
@@ -56,7 +55,6 @@ named `"site"` is an error (ambiguous); no site entry at all is an error.
 |-----|------|---------|-----------|
 | `id` | string | **required** | Instance id; `"site"` selects this entry explicitly. |
 | `siteBroker` | object | **required** | The site broker endpoint — the library `mqttBroker` shape (below). Maps onto the reused provider's `local` slot; there is deliberately no `iotCore` on the site link. |
-| `lwt` | object | — | The **site-connection** Last-Will (below). Applied verbatim by the reused provider at CONNECT; template-resolved + cross-checked at startup. |
 | `uplink` | object | see §uplink | Per-class uplink policy: enables, rate caps, and the `evt` replay buffer. |
 | `reply` | object | see §reply | The reply correlation-map knobs. |
 | `maxHops` | number | `4` | Hop-tag cap (loop protection). |
@@ -73,15 +71,10 @@ The library `mqttBroker` shape (identical to any edgecommons broker config).
 | `clientId` | string | MQTT client id on the site broker — unique per bridge. |
 | `credentials` | object | mTLS: `{ certPath, keyPath, caPath }`. Omit for a plaintext/anonymous broker (dev only). |
 
-### `lwt` (site Last-Will)
-
-| Key | Type | Default | Definition |
-|-----|------|---------|-----------|
-| `topic` | string | — | **Must** equal the bridge's real state topic `ecv1/{device}/uns-bridge/main/state`. `{ThingName}` is template-resolved. A mismatch WARNs at startup (advisory). |
-| `payload` | object/string | — | The will payload — conventionally `{ "status": "UNREACHABLE" }`. |
-| `qos` | number | `0`* | Publish QoS for the will (the sample uses `1`). |
-
-*The library applies its own QoS default when omitted; the bundled sample sets `qos: 1`.
+The site Last-Will is not a configuration object. The bridge derives it from its own resolved state topic and
+registers `{"status":"UNREACHABLE"}` with QoS 1 on the site broker. A configured
+`component.instances[site].lwt` is rejected at startup because a typo here would break the console
+reachability contract.
 
 ### `uplink` — per-class policy
 
@@ -128,7 +121,7 @@ The TTL sweep runs every `min(ttlSecs/4, 5 s)`, floored at 100 ms.
 Overflow drops at the provider (with a warning). Per-reply device-bus subscriptions use a fixed depth of 1
 (first-reply-wins).
 
-## Identity, the state topic, and the LWT cross-check
+## Identity, the state topic, and the derived site LWT
 
 `hierarchy.levels` names the UNS enterprise tree, deepest (the device) last; `identity` supplies every level's
 value **except** the last (which is the resolved thing name from `-t/--thing`). These determine the bridge's
@@ -140,9 +133,8 @@ own `identity` element and its real state topic:
 // with -t gw-01  →  state topic ecv1/gw-01/uns-bridge/main/state
 ```
 
-At startup the bridge derives that exact topic (`gg.uns().topic(State)`) and compares it to the configured
-`instances[site].lwt.topic`. Match ⇒ INFO; mismatch or missing LWT ⇒ WARN (advisory — the configured value is
-still what gets registered). Set your `lwt.topic` to match.
+At startup the bridge derives that exact topic (`gg.uns().topic(State)`) and registers the site Last-Will on
+it. There is no separate LWT topic to configure or cross-check.
 
 ## Precedence & defaults summary
 
@@ -176,7 +168,6 @@ The bundled [`test-configs/config.json`](../../test-configs/config.json) — dev
       {
         "id": "site",
         "siteBroker": { "host": "localhost", "port": 1884, "clientId": "uns-bridge-site" },
-        "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state", "payload": { "status": "UNREACHABLE" }, "qos": 1 },
         "uplink": { "classes": {
           "state":  { "enabled": true },
           "cfg":    { "enabled": true },
@@ -200,5 +191,5 @@ The bundled [`test-configs/config.json`](../../test-configs/config.json) — dev
 - **Greengrass PRIMARY = Nucleus IPC is not supported.** The binary requires the default `standalone`
   feature; on a Greengrass core it runs in its HOST shape against a device-local MQTT broker.
 - **The CLI is `--config`/`--thing` only** — it synthesizes the standard HOST/MQTT edgecommons argv internally.
-- **Template substitution reaches only the site `lwt.topic`** (`{ThingName}`); other `instances[]` values are
-  taken literally.
+- **The site LWT is private and derived.** `component.instances[site].lwt` is rejected; configure only the
+  site broker endpoint and relay policy.

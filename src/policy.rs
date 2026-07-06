@@ -128,7 +128,12 @@ impl TokenBucket {
     /// after `burst` messages everything drops (prefer `enabled: false`).
     fn new(rate: u32, burst: u32) -> TokenBucket {
         let capacity = f64::from(burst);
-        TokenBucket { rate_per_sec: f64::from(rate), capacity, tokens: capacity, last_refill: None }
+        TokenBucket {
+            rate_per_sec: f64::from(rate),
+            capacity,
+            tokens: capacity,
+            last_refill: None,
+        }
     }
 
     /// Refill for the time elapsed since the last call (saturating — a
@@ -181,16 +186,16 @@ impl UplinkPolicy {
     pub fn from_config(cfg: &UplinkConfig) -> UplinkPolicy {
         let classes = POLICY_CLASSES.map(|cls| {
             let policy = cfg.classes.get(cls.token());
-            let enabled =
-                policy.and_then(|p| p.enabled).unwrap_or(cls != UnsClass::App);
+            let enabled = policy
+                .and_then(|p| p.enabled)
+                .unwrap_or(cls != UnsClass::App);
             let bucket = policy.and_then(|p| p.max_rate_per_sec).map(|rate| {
                 let burst = policy
                     .and_then(|p| p.burst)
                     .unwrap_or_else(|| rate.saturating_mul(2));
                 TokenBucket::new(rate, burst)
             });
-            if cls != UnsClass::Evt
-                && policy.is_some_and(|p| p.buffer_while_disconnected.is_some())
+            if cls != UnsClass::Evt && policy.is_some_and(|p| p.buffer_while_disconnected.is_some())
             {
                 tracing::warn!(
                     class = cls.token(),
@@ -208,7 +213,11 @@ impl UplinkPolicy {
             Some(b) => b.max_messages,
             None => DEFAULT_EVT_BUFFER_MAX,
         };
-        UplinkPolicy { classes, evt_buffer: VecDeque::new(), evt_buffer_max }
+        UplinkPolicy {
+            classes,
+            evt_buffer: VecDeque::new(),
+            evt_buffer_max,
+        }
     }
 
     /// The §2.5 admission decision for one forwardable uplink message of
@@ -335,7 +344,10 @@ mod tests {
             assert_eq!(p.class_enabled(cls), cls != UnsClass::App, "{cls:?}");
             assert!(!p.has_rate_cap(cls), "{cls:?} must be uncapped by default");
         }
-        assert!(!p.class_enabled(UnsClass::Cmd), "cmd is not policy-governed");
+        assert!(
+            !p.class_enabled(UnsClass::Cmd),
+            "cmd is not policy-governed"
+        );
         assert!(!p.has_rate_cap(UnsClass::Cmd));
         assert_eq!(p.evt_buffer_capacity(), DEFAULT_EVT_BUFFER_MAX);
         assert_eq!(p.buffered_evt(), 0);
@@ -357,10 +369,19 @@ mod tests {
             "classes": { "log": { "enabled": false }, "evt": { "enabled": false } }
         }));
         let now = Instant::now();
-        assert_eq!(p.admit(UnsClass::Log, true, now), UplinkVerdict::DropDisabled);
-        assert_eq!(p.admit(UnsClass::Log, false, now), UplinkVerdict::DropDisabled);
+        assert_eq!(
+            p.admit(UnsClass::Log, true, now),
+            UplinkVerdict::DropDisabled
+        );
+        assert_eq!(
+            p.admit(UnsClass::Log, false, now),
+            UplinkVerdict::DropDisabled
+        );
         // Disabled beats the evt buffer: a disabled evt never buffers.
-        assert_eq!(p.admit(UnsClass::Evt, false, now), UplinkVerdict::DropDisabled);
+        assert_eq!(
+            p.admit(UnsClass::Evt, false, now),
+            UplinkVerdict::DropDisabled
+        );
         assert_eq!(p.buffered_evt(), 0);
         // The other classes are unaffected.
         assert_eq!(p.admit(UnsClass::State, true, now), UplinkVerdict::Forward);
@@ -369,9 +390,15 @@ mod tests {
     #[test]
     fn app_is_opt_in() {
         let mut off = UplinkPolicy::from_config(&UplinkConfig::default());
-        assert_eq!(off.admit(UnsClass::App, true, Instant::now()), UplinkVerdict::DropDisabled);
+        assert_eq!(
+            off.admit(UnsClass::App, true, Instant::now()),
+            UplinkVerdict::DropDisabled
+        );
         let mut on = policy(serde_json::json!({ "classes": { "app": { "enabled": true } } }));
-        assert_eq!(on.admit(UnsClass::App, true, Instant::now()), UplinkVerdict::Forward);
+        assert_eq!(
+            on.admit(UnsClass::App, true, Instant::now()),
+            UplinkVerdict::Forward
+        );
     }
 
     #[test]
@@ -379,8 +406,14 @@ mod tests {
         // decide() drops cmd on the uplink one step earlier; the policy has no
         // opinion (and must not misreport it as a policy drop).
         let mut p = UplinkPolicy::from_config(&UplinkConfig::default());
-        assert_eq!(p.admit(UnsClass::Cmd, true, Instant::now()), UplinkVerdict::Forward);
-        assert_eq!(p.admit(UnsClass::Cmd, false, Instant::now()), UplinkVerdict::Forward);
+        assert_eq!(
+            p.admit(UnsClass::Cmd, true, Instant::now()),
+            UplinkVerdict::Forward
+        );
+        assert_eq!(
+            p.admit(UnsClass::Cmd, false, Instant::now()),
+            UplinkVerdict::Forward
+        );
     }
 
     // ---- rate caps (deterministic: the clock is injected) ----
@@ -395,16 +428,25 @@ mod tests {
         assert_eq!(p.admit(UnsClass::Data, true, t0), UplinkVerdict::Forward);
         assert_eq!(p.admit(UnsClass::Data, true, t0), UplinkVerdict::Forward);
         // Over the cap at the same instant: dropped.
-        assert_eq!(p.admit(UnsClass::Data, true, t0), UplinkVerdict::DropRateCapped);
+        assert_eq!(
+            p.admit(UnsClass::Data, true, t0),
+            UplinkVerdict::DropRateCapped
+        );
         // 100 ms at 10/s refills exactly one token.
         let t1 = t0 + Duration::from_millis(100);
         assert_eq!(p.admit(UnsClass::Data, true, t1), UplinkVerdict::Forward);
-        assert_eq!(p.admit(UnsClass::Data, true, t1), UplinkVerdict::DropRateCapped);
+        assert_eq!(
+            p.admit(UnsClass::Data, true, t1),
+            UplinkVerdict::DropRateCapped
+        );
         // A long idle refills to the burst capacity, never beyond.
         let t2 = t1 + Duration::from_secs(3600);
         assert_eq!(p.admit(UnsClass::Data, true, t2), UplinkVerdict::Forward);
         assert_eq!(p.admit(UnsClass::Data, true, t2), UplinkVerdict::Forward);
-        assert_eq!(p.admit(UnsClass::Data, true, t2), UplinkVerdict::DropRateCapped);
+        assert_eq!(
+            p.admit(UnsClass::Data, true, t2),
+            UplinkVerdict::DropRateCapped
+        );
     }
 
     #[test]
@@ -415,9 +457,16 @@ mod tests {
         assert!(p.has_rate_cap(UnsClass::Metric));
         let t0 = Instant::now();
         for i in 0..6 {
-            assert_eq!(p.admit(UnsClass::Metric, true, t0), UplinkVerdict::Forward, "burst msg {i}");
+            assert_eq!(
+                p.admit(UnsClass::Metric, true, t0),
+                UplinkVerdict::Forward,
+                "burst msg {i}"
+            );
         }
-        assert_eq!(p.admit(UnsClass::Metric, true, t0), UplinkVerdict::DropRateCapped);
+        assert_eq!(
+            p.admit(UnsClass::Metric, true, t0),
+            UplinkVerdict::DropRateCapped
+        );
     }
 
     #[test]
@@ -427,10 +476,16 @@ mod tests {
         }));
         let t0 = Instant::now();
         assert_eq!(p.admit(UnsClass::Data, true, t0), UplinkVerdict::Forward);
-        assert_eq!(p.admit(UnsClass::Data, true, t0), UplinkVerdict::DropRateCapped);
+        assert_eq!(
+            p.admit(UnsClass::Data, true, t0),
+            UplinkVerdict::DropRateCapped
+        );
         // Rate 0 never refills — not even after an hour.
         let t1 = t0 + Duration::from_secs(3600);
-        assert_eq!(p.admit(UnsClass::Data, true, t1), UplinkVerdict::DropRateCapped);
+        assert_eq!(
+            p.admit(UnsClass::Data, true, t1),
+            UplinkVerdict::DropRateCapped
+        );
     }
 
     #[test]
@@ -442,7 +497,10 @@ mod tests {
         assert_eq!(p.admit(UnsClass::Data, true, t1), UplinkVerdict::Forward);
         // Time goes "backwards": saturates to zero elapsed — no refill.
         let t0 = t1 - Duration::from_secs(5);
-        assert_eq!(p.admit(UnsClass::Data, true, t0), UplinkVerdict::DropRateCapped);
+        assert_eq!(
+            p.admit(UnsClass::Data, true, t0),
+            UplinkVerdict::DropRateCapped
+        );
     }
 
     #[test]
@@ -462,8 +520,18 @@ mod tests {
             "classes": { "data": { "maxRatePerSec": 0, "burst": 1 } }
         }));
         let now = Instant::now();
-        for cls in [UnsClass::State, UnsClass::Cfg, UnsClass::Metric, UnsClass::Data, UnsClass::Log] {
-            assert_eq!(p.admit(cls, false, now), UplinkVerdict::DropDisconnected, "{cls:?}");
+        for cls in [
+            UnsClass::State,
+            UnsClass::Cfg,
+            UnsClass::Metric,
+            UnsClass::Data,
+            UnsClass::Log,
+        ] {
+            assert_eq!(
+                p.admit(cls, false, now),
+                UplinkVerdict::DropDisconnected,
+                "{cls:?}"
+            );
         }
         // No token was consumed while disconnected: the single burst token is
         // still there once the link is back.
@@ -473,9 +541,17 @@ mod tests {
     #[test]
     fn disconnected_evt_buffers() {
         let mut p = UplinkPolicy::from_config(&UplinkConfig::default());
-        assert_eq!(p.admit(UnsClass::Evt, false, Instant::now()), UplinkVerdict::Buffer);
+        assert_eq!(
+            p.admit(UnsClass::Evt, false, Instant::now()),
+            UplinkVerdict::Buffer
+        );
         let (topic, bytes) = item(1);
-        assert_eq!(p.push_evt(topic, bytes), EvtPush::Stored { evicted_oldest: false });
+        assert_eq!(
+            p.push_evt(topic, bytes),
+            EvtPush::Stored {
+                evicted_oldest: false
+            }
+        );
         assert_eq!(p.buffered_evt(), 1);
     }
 
@@ -485,7 +561,10 @@ mod tests {
             "classes": { "evt": { "bufferWhileDisconnected": { "enabled": false } } }
         }));
         assert_eq!(p.evt_buffer_capacity(), 0);
-        assert_eq!(p.admit(UnsClass::Evt, false, Instant::now()), UplinkVerdict::DropDisconnected);
+        assert_eq!(
+            p.admit(UnsClass::Evt, false, Instant::now()),
+            UplinkVerdict::DropDisconnected
+        );
         let (topic, bytes) = item(1);
         assert_eq!(p.push_evt(topic, bytes), EvtPush::Rejected);
     }
@@ -496,7 +575,10 @@ mod tests {
             "classes": { "evt": { "bufferWhileDisconnected": { "maxMessages": 0 } } }
         }));
         assert_eq!(p.evt_buffer_capacity(), 0);
-        assert_eq!(p.admit(UnsClass::Evt, false, Instant::now()), UplinkVerdict::DropDisconnected);
+        assert_eq!(
+            p.admit(UnsClass::Evt, false, Instant::now()),
+            UplinkVerdict::DropDisconnected
+        );
     }
 
     #[test]
@@ -527,9 +609,24 @@ mod tests {
         let (t1, b1) = item(1);
         let (t2, b2) = item(2);
         let (t3, b3) = item(3);
-        assert_eq!(p.push_evt(t1, b1), EvtPush::Stored { evicted_oldest: false });
-        assert_eq!(p.push_evt(t2.clone(), b2), EvtPush::Stored { evicted_oldest: false });
-        assert_eq!(p.push_evt(t3.clone(), b3), EvtPush::Stored { evicted_oldest: true });
+        assert_eq!(
+            p.push_evt(t1, b1),
+            EvtPush::Stored {
+                evicted_oldest: false
+            }
+        );
+        assert_eq!(
+            p.push_evt(t2.clone(), b2),
+            EvtPush::Stored {
+                evicted_oldest: false
+            }
+        );
+        assert_eq!(
+            p.push_evt(t3.clone(), b3),
+            EvtPush::Stored {
+                evicted_oldest: true
+            }
+        );
         assert_eq!(p.buffered_evt(), 2, "the bound holds");
         assert_eq!(p.pop_evt().unwrap().0, t2, "e1 was the drop-oldest victim");
         assert_eq!(p.pop_evt().unwrap().0, t3);
@@ -547,7 +644,11 @@ mod tests {
         let (topic, bytes) = p.pop_evt().unwrap();
         assert_eq!(topic, t1);
         assert!(p.requeue_evt_front(topic, bytes));
-        assert_eq!(p.pop_evt().unwrap().0, t1, "the requeued message replays first");
+        assert_eq!(
+            p.pop_evt().unwrap().0,
+            t1,
+            "the requeued message replays first"
+        );
         assert_eq!(p.pop_evt().unwrap().0, t2);
     }
 
@@ -576,8 +677,15 @@ mod tests {
         let mut p = policy(serde_json::json!({
             "classes": { "data": { "bufferWhileDisconnected": { "maxMessages": 5 } } }
         }));
-        assert_eq!(p.admit(UnsClass::Data, false, Instant::now()), UplinkVerdict::DropDisconnected);
-        assert_eq!(p.evt_buffer_capacity(), DEFAULT_EVT_BUFFER_MAX, "evt keeps its own default");
+        assert_eq!(
+            p.admit(UnsClass::Data, false, Instant::now()),
+            UplinkVerdict::DropDisconnected
+        );
+        assert_eq!(
+            p.evt_buffer_capacity(),
+            DEFAULT_EVT_BUFFER_MAX,
+            "evt keeps its own default"
+        );
     }
 
     #[test]

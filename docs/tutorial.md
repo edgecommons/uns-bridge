@@ -37,9 +37,9 @@ cargo run -- --config ./test-configs/config.json --thing gw-01
 ```
 
 You should see it (in order): initialize the edgecommons runtime against the **device** bus, establish the
-**relay's** own device-bus connection, run the **LWT cross-check**, connect to the **site** broker, subscribe
-its uplink filters, and log `relay running`. The device identity is `gw-01` (from `--thing`); the bundled
-config places it at `dallas/gw-01` via `hierarchy`/`identity`.
+**relay's** own device-bus connection, derive the private site Last-Will from the bridge's state topic,
+connect to the **site** broker, subscribe its uplink filters, and log `relay running`. The device identity is
+`gw-01` (from `--thing`); the bundled config places it at `dallas/gw-01` via `hierarchy`/`identity`.
 
 Leave it running. It is now doing three things at once: mirroring its own health onto both buses, pumping
 device traffic up to the site broker, and listening for commands to bring down.

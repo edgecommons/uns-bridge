@@ -135,7 +135,11 @@ impl ReplyCorrelator {
     /// `max_pending` of 0 is treated as 1 — the map must be able to hold the
     /// entry it just recorded.
     pub fn new(ttl: Duration, max_pending: usize) -> ReplyCorrelator {
-        ReplyCorrelator { ttl, max_pending: max_pending.max(1), pending: Vec::new() }
+        ReplyCorrelator {
+            ttl,
+            max_pending: max_pending.max(1),
+            pending: Vec::new(),
+        }
     }
 
     /// Inspect one decided-and-forwardable downlink `cmd` (the bytes
@@ -194,7 +198,11 @@ impl ReplyCorrelator {
                 deadline: now + self.ttl,
             },
         ));
-        DownlinkRewrite::Rewritten { bytes, bridge_topic, evicted }
+        DownlinkRewrite::Rewritten {
+            bytes,
+            bridge_topic,
+            evicted,
+        }
     }
 
     /// Resolve-and-remove: the original site `reply_to` for `bridge_topic`, or
@@ -336,9 +344,11 @@ mod tests {
         now: Instant,
     ) -> (Vec<u8>, String, Option<String>) {
         match c.rewrite_downlink(&cmd(Some(site_reply)), now) {
-            DownlinkRewrite::Rewritten { bytes, bridge_topic, evicted } => {
-                (bytes, bridge_topic, evicted)
-            }
+            DownlinkRewrite::Rewritten {
+                bytes,
+                bridge_topic,
+                evicted,
+            } => (bytes, bridge_topic, evicted),
             other => panic!("expected Rewritten, got {other:?}"),
         }
     }
@@ -348,15 +358,24 @@ mod tests {
     #[test]
     fn cmd_without_reply_to_is_passthrough() {
         let mut c = correlator(60, 1024);
-        assert_eq!(c.rewrite_downlink(&cmd(None), Instant::now()), DownlinkRewrite::Passthrough);
-        assert!(c.is_empty(), "a fire-and-forget cmd must not create an entry");
+        assert_eq!(
+            c.rewrite_downlink(&cmd(None), Instant::now()),
+            DownlinkRewrite::Passthrough
+        );
+        assert!(
+            c.is_empty(),
+            "a fire-and-forget cmd must not create an entry"
+        );
     }
 
     #[test]
     fn raw_cmd_is_passthrough() {
         let mut c = correlator(60, 1024);
         let raw = serde_json::to_vec(&json!({ "do": "reload" })).unwrap();
-        assert_eq!(c.rewrite_downlink(&raw, Instant::now()), DownlinkRewrite::Passthrough);
+        assert_eq!(
+            c.rewrite_downlink(&raw, Instant::now()),
+            DownlinkRewrite::Passthrough
+        );
         assert!(c.is_empty());
     }
 
@@ -366,7 +385,10 @@ mod tests {
         // step earlier); the fallback is the pre-P3-3 behavior: relay unchanged.
         let mut c = correlator(60, 1024);
         let malformed = serde_json::to_vec(&json!({ "header": 42, "body": {} })).unwrap();
-        assert_eq!(c.rewrite_downlink(&malformed, Instant::now()), DownlinkRewrite::Passthrough);
+        assert_eq!(
+            c.rewrite_downlink(&malformed, Instant::now()),
+            DownlinkRewrite::Passthrough
+        );
         assert!(c.is_empty());
     }
 
@@ -428,10 +450,17 @@ mod tests {
         assert!(e1.is_none() && e2.is_none());
 
         let (_, t3, e3) = rewritten_for(&mut c, "edgecommons/reply-site-3", now);
-        assert_eq!(e3, Some(t1.clone()), "the OLDEST entry is the eviction victim");
+        assert_eq!(
+            e3,
+            Some(t1.clone()),
+            "the OLDEST entry is the eviction victim"
+        );
         assert_eq!(c.len(), 2, "the bound holds after eviction");
         assert_eq!(c.take(&t1), None, "the evicted entry is gone");
-        assert!(c.contains(&t2) && c.contains(&t3), "younger entries survive");
+        assert!(
+            c.contains(&t2) && c.contains(&t3),
+            "younger entries survive"
+        );
     }
 
     #[test]
@@ -453,8 +482,11 @@ mod tests {
         let t0 = Instant::now();
         let (_, old1, _) = rewritten_for(&mut c, "edgecommons/reply-site-1", t0);
         let (_, old2, _) = rewritten_for(&mut c, "edgecommons/reply-site-2", t0);
-        let (_, young, _) =
-            rewritten_for(&mut c, "edgecommons/reply-site-3", t0 + Duration::from_secs(30));
+        let (_, young, _) = rewritten_for(
+            &mut c,
+            "edgecommons/reply-site-3",
+            t0 + Duration::from_secs(30),
+        );
 
         // Just before the first deadline: nothing expires.
         assert!(c.sweep(t0 + Duration::from_secs(59)).is_empty());
@@ -466,7 +498,10 @@ mod tests {
         // Past the young entry's deadline too.
         assert_eq!(c.sweep(t0 + Duration::from_secs(91)), vec![young]);
         assert!(c.is_empty());
-        assert!(c.sweep(t0 + Duration::from_secs(120)).is_empty(), "sweeping empty is empty");
+        assert!(
+            c.sweep(t0 + Duration::from_secs(120)).is_empty(),
+            "sweeping empty is empty"
+        );
     }
 
     #[test]
@@ -490,10 +525,26 @@ mod tests {
 
     #[test]
     fn sweep_interval_is_quarter_ttl_capped_and_floored() {
-        assert_eq!(correlator(60, 1).sweep_interval(), Duration::from_secs(5), "min(15s, 5s)");
-        assert_eq!(correlator(8, 1).sweep_interval(), Duration::from_secs(2), "ttl/4 below the cap");
-        assert_eq!(correlator(0, 1).sweep_interval(), Duration::from_millis(100), "floor");
-        assert_eq!(correlator(10_000, 1).sweep_interval(), Duration::from_secs(5), "cap");
+        assert_eq!(
+            correlator(60, 1).sweep_interval(),
+            Duration::from_secs(5),
+            "min(15s, 5s)"
+        );
+        assert_eq!(
+            correlator(8, 1).sweep_interval(),
+            Duration::from_secs(2),
+            "ttl/4 below the cap"
+        );
+        assert_eq!(
+            correlator(0, 1).sweep_interval(),
+            Duration::from_millis(100),
+            "floor"
+        );
+        assert_eq!(
+            correlator(10_000, 1).sweep_interval(),
+            Duration::from_secs(5),
+            "cap"
+        );
     }
 
     // ---- the reply back-haul transform (prepare_reply) ----
@@ -519,20 +570,32 @@ mod tests {
         input["header"].as_object_mut().unwrap().remove("reply_to");
         input["tags"][RELAY_TAG] = json!([HOP]);
         assert_eq!(output, input);
-        assert_eq!(output["header"]["correlation_id"], "corr-9", "correlation_id preserved");
-        assert!(output["header"].get("reply_to").is_none(), "a relayed reply carries no reply_to");
+        assert_eq!(
+            output["header"]["correlation_id"], "corr-9",
+            "correlation_id preserved"
+        );
+        assert!(
+            output["header"].get("reply_to").is_none(),
+            "a relayed reply carries no reply_to"
+        );
     }
 
     #[test]
     fn raw_json_reply_relays_byte_for_byte() {
         let payload = serde_json::to_vec(&json!({ "ok": true })).unwrap();
-        assert_eq!(prepare_reply(&engine(), &payload), ReplyRelay::Forward(payload));
+        assert_eq!(
+            prepare_reply(&engine(), &payload),
+            ReplyRelay::Forward(payload)
+        );
     }
 
     #[test]
     fn raw_non_json_reply_relays_byte_for_byte() {
         let payload = b"plain ack".to_vec();
-        assert_eq!(prepare_reply(&engine(), &payload), ReplyRelay::Forward(payload));
+        assert_eq!(
+            prepare_reply(&engine(), &payload),
+            ReplyRelay::Forward(payload)
+        );
     }
 
     #[test]
@@ -543,12 +606,17 @@ mod tests {
             .build()
             .to_vec()
             .unwrap();
-        assert_eq!(prepare_reply(&engine(), &reply), ReplyRelay::Drop(DropReason::OwnEcho));
+        assert_eq!(
+            prepare_reply(&engine(), &reply),
+            ReplyRelay::Drop(DropReason::OwnEcho)
+        );
     }
 
     #[test]
     fn reply_at_max_hops_is_dropped() {
-        let hops: Vec<String> = (0..DEFAULT_MAX_HOPS).map(|i| format!("gw-{i}/uns-bridge")).collect();
+        let hops: Vec<String> = (0..DEFAULT_MAX_HOPS)
+            .map(|i| format!("gw-{i}/uns-bridge"))
+            .collect();
         let reply = MessageBuilder::new("r", "1.0")
             .payload(json!({}))
             .tag(RELAY_TAG, json!(hops))

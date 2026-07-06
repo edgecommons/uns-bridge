@@ -51,7 +51,7 @@ use edgecommons::metrics::{MetricBuilder, MetricService};
 use tokio::task::JoinHandle;
 
 use crate::config::{QueueConfig, ReplyConfig, UplinkConfig};
-use crate::observability::{relay_metric_groups, metric_definitions, RelaySnapshot};
+use crate::observability::{metric_definitions, relay_metric_groups, RelaySnapshot};
 use crate::policy::{class_index, EvtPush, UplinkPolicy, UplinkVerdict, POLICY_CLASSES};
 use crate::relay::{Direction, DropReason, RelayDecision, RelayEngine, REHYDRATION_CMDS};
 use crate::reply::{prepare_reply, DownlinkRewrite, ReplyCorrelator, ReplyRelay};
@@ -171,7 +171,9 @@ struct ReplyProxy {
 impl ReplyProxy {
     /// Poison-recovering lock — a panicked task must not wedge the map.
     fn correlator(&self) -> MutexGuard<'_, ReplyCorrelator> {
-        self.correlator.lock().unwrap_or_else(PoisonError::into_inner)
+        self.correlator
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Expire one bridge reply topic: unsubscribe it on the device bus and count
@@ -179,7 +181,11 @@ impl ReplyProxy {
     /// overflow path — §2.4 counts both as expiries.
     async fn expire(&self, bridge_topic: &str) {
         self.counters.reply_expired.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = self.primary.unsubscribe(bridge_topic, Destination::Local).await {
+        if let Err(e) = self
+            .primary
+            .unsubscribe(bridge_topic, Destination::Local)
+            .await
+        {
             tracing::warn!(topic = %bridge_topic, error = %e, "expired reply-topic unsubscribe failed");
         }
         tracing::debug!(topic = %bridge_topic, "reply correlation entry expired");
@@ -191,7 +197,12 @@ impl ReplyProxy {
     /// relayed because its reply subscription could not be established.
     async fn rewrite_downlink(self: &Arc<Self>, topic: &str, bytes: Vec<u8>) -> Option<Vec<u8>> {
         let action = self.correlator().rewrite_downlink(&bytes, Instant::now());
-        let DownlinkRewrite::Rewritten { bytes, bridge_topic, evicted } = action else {
+        let DownlinkRewrite::Rewritten {
+            bytes,
+            bridge_topic,
+            evicted,
+        } = action
+        else {
             return Some(bytes); // fire-and-forget cmd / raw — relayed as before
         };
         if let Some(oldest) = evicted {
@@ -202,7 +213,11 @@ impl ReplyProxy {
         // subscribe R_dev → map → publish). `max_messages = 1` gives the
         // library's own first-reply-wins / at-most-one-reply contract;
         // stragglers drop at the provider (debug-logged there).
-        match self.primary.subscribe(&bridge_topic, Destination::Local, Qos::AtLeastOnce, 1).await {
+        match self
+            .primary
+            .subscribe(&bridge_topic, Destination::Local, Qos::AtLeastOnce, 1)
+            .await
+        {
             Ok(sub) => {
                 if self.correlator().contains(&bridge_topic) {
                     self.spawn_reply_pump(bridge_topic, sub);
@@ -212,8 +227,10 @@ impl ReplyProxy {
                     // relay the cmd (same outcome as expiry-before-reply) but
                     // leave no dangling subscription behind.
                     drop(sub);
-                    if let Err(e) =
-                        self.primary.unsubscribe(&bridge_topic, Destination::Local).await
+                    if let Err(e) = self
+                        .primary
+                        .unsubscribe(&bridge_topic, Destination::Local)
+                        .await
                     {
                         tracing::warn!(topic = %bridge_topic, error = %e, "already-expired reply-topic unsubscribe failed");
                     }
@@ -243,7 +260,10 @@ impl ReplyProxy {
             // recv() == None: the subscription closed (TTL expiry / eviction /
             // shutdown already unsubscribed it) — nothing left to resolve.
         });
-        let mut tasks = self.reply_tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut tasks = self
+            .reply_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|h| !h.is_finished());
         tasks.push(handle);
     }
@@ -261,7 +281,10 @@ impl ReplyProxy {
         };
         match prepare_reply(&self.engine, payload) {
             ReplyRelay::Forward(bytes) => {
-                match self.site.publish(&site_topic, bytes, Destination::Local, Qos::AtLeastOnce).await
+                match self
+                    .site
+                    .publish(&site_topic, bytes, Destination::Local, Qos::AtLeastOnce)
+                    .await
                 {
                     Ok(()) => {
                         self.counters.reply_relayed.fetch_add(1, Ordering::Relaxed);
@@ -278,7 +301,11 @@ impl ReplyProxy {
                 tracing::debug!(topic = %bridge_topic, ?reason, "reply not relayed");
             }
         }
-        if let Err(e) = self.primary.unsubscribe(bridge_topic, Destination::Local).await {
+        if let Err(e) = self
+            .primary
+            .unsubscribe(bridge_topic, Destination::Local)
+            .await
+        {
             tracing::warn!(topic = %bridge_topic, error = %e, "settled reply-topic unsubscribe failed");
         }
     }
@@ -308,7 +335,9 @@ impl UplinkGovernor {
             EvtPush::Stored { evicted_oldest } => {
                 self.counters.evt_buffered.fetch_add(1, Ordering::Relaxed);
                 if evicted_oldest {
-                    self.counters.evt_buffer_dropped.fetch_add(1, Ordering::Relaxed);
+                    self.counters
+                        .evt_buffer_dropped
+                        .fetch_add(1, Ordering::Relaxed);
                     tracing::debug!("evt replay buffer full: oldest dropped (drop-oldest)");
                 }
             }
@@ -331,24 +360,39 @@ impl UplinkGovernor {
             match policy.admit(class, self.site.connected(), Instant::now()) {
                 UplinkVerdict::Forward => {}
                 UplinkVerdict::Buffer => {
-                    tracing::debug!(topic, "evt buffered for replay (site link down or replay pending)");
+                    tracing::debug!(
+                        topic,
+                        "evt buffered for replay (site link down or replay pending)"
+                    );
                     let push = policy.push_evt(topic, bytes);
                     self.record_push(push, class);
                     return;
                 }
                 UplinkVerdict::DropDisabled => {
                     self.counters.dropped_disabled.incr(class);
-                    tracing::debug!(topic, class = class.token(), "uplink class disabled; dropped");
+                    tracing::debug!(
+                        topic,
+                        class = class.token(),
+                        "uplink class disabled; dropped"
+                    );
                     return;
                 }
                 UplinkVerdict::DropDisconnected => {
                     self.counters.dropped_disconnected.incr(class);
-                    tracing::debug!(topic, class = class.token(), "site link down; dropped (live path is not durable)");
+                    tracing::debug!(
+                        topic,
+                        class = class.token(),
+                        "site link down; dropped (live path is not durable)"
+                    );
                     return;
                 }
                 UplinkVerdict::DropRateCapped => {
                     self.counters.dropped_rate.incr(class);
-                    tracing::debug!(topic, class = class.token(), "over the class rate cap; dropped");
+                    tracing::debug!(
+                        topic,
+                        class = class.token(),
+                        "over the class rate cap; dropped"
+                    );
                     return;
                 }
             }
@@ -356,7 +400,11 @@ impl UplinkGovernor {
         // Forward: publish to the site broker. Keep an evt copy so a failed
         // publish can still buffer it (the failed publish == disconnect rule).
         let retained = (class == UnsClass::Evt).then(|| (topic.clone(), bytes.clone()));
-        match self.site.publish(&topic, bytes, Destination::Local, Qos::AtLeastOnce).await {
+        match self
+            .site
+            .publish(&topic, bytes, Destination::Local, Qos::AtLeastOnce)
+            .await
+        {
             Ok(()) => {
                 self.counters.uplinked.incr(class);
                 tracing::debug!(topic, "relayed up");
@@ -383,7 +431,10 @@ impl UplinkGovernor {
             let Some((topic, bytes)) = self.policy().pop_evt() else {
                 return; // drained — the buffer clears as it empties
             };
-            match self.site.publish(&topic, bytes.clone(), Destination::Local, Qos::AtLeastOnce).await
+            match self
+                .site
+                .publish(&topic, bytes.clone(), Destination::Local, Qos::AtLeastOnce)
+                .await
             {
                 Ok(()) => {
                     self.counters.evt_replayed.fetch_add(1, Ordering::Relaxed);
@@ -394,7 +445,9 @@ impl UplinkGovernor {
                     if !self.policy().requeue_evt_front(topic, bytes) {
                         // The buffer refilled to its bound while this message
                         // was in flight: under drop-oldest it IS the victim.
-                        self.counters.evt_buffer_dropped.fetch_add(1, Ordering::Relaxed);
+                        self.counters
+                            .evt_buffer_dropped
+                            .fetch_add(1, Ordering::Relaxed);
                     }
                     return;
                 }
@@ -462,8 +515,13 @@ async fn publish_rehydration_bcast(device_bus: &Arc<dyn MessagingProvider>, topi
                 continue;
             }
         };
-        match device_bus.publish(topic, bytes, Destination::Local, Qos::AtLeastOnce).await {
-            Ok(()) => tracing::info!(topic = %topic, "rehydration broadcast published (site reconnect)"),
+        match device_bus
+            .publish(topic, bytes, Destination::Local, Qos::AtLeastOnce)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(topic = %topic, "rehydration broadcast published (site reconnect)")
+            }
             Err(e) => {
                 tracing::warn!(topic = %topic, error = %e, "rehydration broadcast publish failed (best-effort)")
             }
@@ -548,16 +606,27 @@ impl RelayIo {
 
         // UPLINK pumps: device bus → site broker, each through the §2.5 policy.
         for (cls, filter) in engine.uplink_subscriptions() {
-            let depth = if *cls == UnsClass::Data { queue.data } else { queue.default_depth };
+            let depth = if *cls == UnsClass::Data {
+                queue.data
+            } else {
+                queue.default_depth
+            };
             let sub = primary
                 .subscribe(filter, Destination::Local, Qos::AtLeastOnce, depth)
                 .await?;
-            tracing::info!(filter, depth, "uplink subscription established (device bus)");
+            tracing::info!(
+                filter,
+                depth,
+                "uplink subscription established (device bus)"
+            );
             tasks.push(tokio::spawn(pump(
                 sub,
                 Arc::clone(&engine),
                 Arc::clone(&counters),
-                PumpRole::Uplink { class: *cls, governor: Arc::clone(&governor) },
+                PumpRole::Uplink {
+                    class: *cls,
+                    governor: Arc::clone(&governor),
+                },
             )));
         }
 
@@ -565,7 +634,12 @@ impl RelayIo {
         // each forwardable cmd through the §2.4 reply proxy.
         let downlink = engine.downlink_filter().to_string();
         let sub = site
-            .subscribe(&downlink, Destination::Local, Qos::AtLeastOnce, queue.default_depth)
+            .subscribe(
+                &downlink,
+                Destination::Local,
+                Qos::AtLeastOnce,
+                queue.default_depth,
+            )
             .await?;
         tracing::info!(filter = %downlink, "downlink subscription established (site broker)");
         tasks.push(tokio::spawn(pump(
@@ -679,7 +753,15 @@ impl RelayIo {
             }));
         }
 
-        Ok(RelayIo { engine, primary, site, counters, reply_proxy, governor, tasks })
+        Ok(RelayIo {
+            engine,
+            primary,
+            site,
+            counters,
+            reply_proxy,
+            governor,
+            tasks,
+        })
     }
 
     /// The live relay counters.
@@ -709,8 +791,11 @@ impl RelayIo {
             let _ = task.await; // JoinError(Cancelled) is expected
         }
         let reply_tasks: Vec<JoinHandle<()>> = {
-            let mut guard =
-                self.reply_proxy.reply_tasks.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut guard = self
+                .reply_proxy
+                .reply_tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             guard.drain(..).collect()
         };
         for task in &reply_tasks {
@@ -749,9 +834,15 @@ impl RelayIo {
 enum PumpRole {
     /// Device bus → site broker, one pump per relayed class (the class rides
     /// along so the policy and the per-class counters key correctly).
-    Uplink { class: UnsClass, governor: Arc<UplinkGovernor> },
+    Uplink {
+        class: UnsClass,
+        governor: Arc<UplinkGovernor>,
+    },
     /// Site broker → device bus (own-device `cmd` only).
-    Downlink { proxy: Arc<ReplyProxy>, device_bus: Arc<dyn MessagingProvider> },
+    Downlink {
+        proxy: Arc<ReplyProxy>,
+        device_bus: Arc<dyn MessagingProvider>,
+    },
 }
 
 impl PumpRole {
@@ -848,7 +939,12 @@ mod tests {
         }
         /// The currently registered (still-subscribed) filters.
         fn subscriptions(&self) -> Vec<String> {
-            self.subs.lock().unwrap().iter().map(|(f, _)| f.clone()).collect()
+            self.subs
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(f, _)| f.clone())
+                .collect()
         }
         /// Toggle the `connected()` signal (the site-link up/down seam).
         fn set_connected(&self, connected: bool) {
@@ -874,7 +970,10 @@ mod tests {
                     "forced publish failure for {topic}"
                 )));
             }
-            self.published.lock().unwrap().push((topic.to_string(), payload.clone()));
+            self.published
+                .lock()
+                .unwrap()
+                .push((topic.to_string(), payload.clone()));
             let subs = self.subs.lock().unwrap().clone();
             for (filter, tx) in subs {
                 if topic_matches(&filter, topic) {
@@ -932,7 +1031,11 @@ mod tests {
 
     /// Start with an `uplink` policy block given as its config JSON.
     async fn started_uplink(uplink: Value) -> (RelayIo, Arc<FakeProvider>, Arc<FakeProvider>) {
-        started_opts(ReplyConfig::default(), serde_json::from_value(uplink).unwrap()).await
+        started_opts(
+            ReplyConfig::default(),
+            serde_json::from_value(uplink).unwrap(),
+        )
+        .await
     }
 
     async fn started_opts(
@@ -977,13 +1080,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(wait_until(|| !site.published().is_empty()).await, "uplink did not arrive");
+        assert!(
+            wait_until(|| !site.published().is_empty()).await,
+            "uplink did not arrive"
+        );
         let (site_topic, bytes) = site.published().remove(0);
         assert_eq!(site_topic, topic, "topic-verbatim relay");
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
         assert_eq!(v["body"]["status"], "RUNNING");
-        assert_eq!(io.counters().uplinked.get(UnsClass::State), 1, "uplinked counts per class");
+        assert_eq!(
+            io.counters().uplinked.get(UnsClass::State),
+            1,
+            "uplinked counts per class"
+        );
         assert_eq!(io.counters().uplinked.total(), 1);
         io.shutdown().await;
     }
@@ -1000,7 +1110,12 @@ mod tests {
             .to_vec()
             .unwrap();
         device
-            .publish("ecv1/gw-01/c/main/state", stamped, Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                "ecv1/gw-01/c/main/state",
+                stamped,
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
 
@@ -1008,7 +1123,10 @@ mod tests {
             wait_until(|| io.counters().loop_dropped.load(Ordering::Relaxed) == 1).await,
             "loop drop not counted"
         );
-        assert!(site.published().is_empty(), "own echo must not reach the site broker");
+        assert!(
+            site.published().is_empty(),
+            "own echo must not reach the site broker"
+        );
         io.shutdown().await;
     }
 
@@ -1016,9 +1134,14 @@ mod tests {
     async fn downlink_relays_own_device_cmd_to_the_device_bus() {
         let (io, device, site) = started().await;
         let topic = "ecv1/gw-01/opcua-adapter/main/cmd/reload-config";
-        site.publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce).await.unwrap();
+        site.publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
 
-        assert!(wait_until(|| !device.published().is_empty()).await, "downlink did not arrive");
+        assert!(
+            wait_until(|| !device.published().is_empty()).await,
+            "downlink did not arrive"
+        );
         let (dev_topic, bytes) = device.published().remove(0);
         assert_eq!(dev_topic, topic);
         let v: Value = serde_json::from_slice(&bytes).unwrap();
@@ -1055,7 +1178,9 @@ mod tests {
         // even for raw messages.
         let (io, device, site) = started().await;
         let topic = "ecv1/gw-01/opcua-adapter/main/cmd/ping";
-        site.publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce).await.unwrap();
+        site.publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
 
         assert!(wait_until(|| !device.published().is_empty()).await);
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1078,7 +1203,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(wait_until(|| !site.published().is_empty()).await, "raw uplink did not arrive");
+        assert!(
+            wait_until(|| !site.published().is_empty()).await,
+            "raw uplink did not arrive"
+        );
         let (site_topic, bytes) = site.published().remove(0);
         assert_eq!(site_topic, topic);
         assert_eq!(bytes, payload, "raw payload must relay verbatim");
@@ -1123,7 +1251,10 @@ mod tests {
     /// The `header.reply_to` of a relayed envelope.
     fn reply_to_of(bytes: &[u8]) -> String {
         let v: Value = serde_json::from_slice(bytes).unwrap();
-        v["header"]["reply_to"].as_str().expect("relayed cmd must carry reply_to").to_string()
+        v["header"]["reply_to"]
+            .as_str()
+            .expect("relayed cmd must carry reply_to")
+            .to_string()
     }
 
     /// Relay one cmd-with-reply_to downlink and return its bridge reply topic.
@@ -1134,9 +1265,14 @@ mod tests {
         corr: &str,
     ) -> String {
         let already = device.published().len();
-        site.publish(CMD_TOPIC, cmd_with_reply(site_reply, corr), Destination::Local, Qos::AtLeastOnce)
-            .await
-            .unwrap();
+        site.publish(
+            CMD_TOPIC,
+            cmd_with_reply(site_reply, corr),
+            Destination::Local,
+            Qos::AtLeastOnce,
+        )
+        .await
+        .unwrap();
         assert!(
             wait_until(|| device.published().len() > already).await,
             "downlink cmd did not arrive on the device bus"
@@ -1154,7 +1290,10 @@ mod tests {
         let (dev_topic, bytes) = device.published().remove(0);
         assert_eq!(dev_topic, CMD_TOPIC, "topic-verbatim relay");
         assert!(bridge_topic.starts_with(BRIDGE_PREFIX));
-        assert_ne!(bridge_topic, SITE_REPLY, "the site reply topic must not leak down");
+        assert_ne!(
+            bridge_topic, SITE_REPLY,
+            "the site reply topic must not leak down"
+        );
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["header"]["correlation_id"], "corr-1");
         assert_eq!(v["body"]["why"], "test");
@@ -1183,7 +1322,10 @@ mod tests {
             .build()
             .to_vec()
             .unwrap();
-        device.publish(&bridge_topic, reply, Destination::Local, Qos::AtLeastOnce).await.unwrap();
+        device
+            .publish(&bridge_topic, reply, Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
 
         // The reply lands on the ORIGINAL site reply topic, verbatim except the
         // hop tag: correlation id + body preserved, reply_to absent.
@@ -1191,12 +1333,21 @@ mod tests {
             wait_until(|| site.published().iter().any(|(t, _)| t == SITE_REPLY)).await,
             "reply did not reach the site broker"
         );
-        let (_, bytes) =
-            site.published().into_iter().find(|(t, _)| t == SITE_REPLY).unwrap();
+        let (_, bytes) = site
+            .published()
+            .into_iter()
+            .find(|(t, _)| t == SITE_REPLY)
+            .unwrap();
         let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["header"]["correlation_id"], "corr-1", "correlation_id preserved");
+        assert_eq!(
+            v["header"]["correlation_id"], "corr-1",
+            "correlation_id preserved"
+        );
         assert_eq!(v["body"], json!({ "ok": true, "n": 42 }), "body verbatim");
-        assert!(v["header"].get("reply_to").is_none(), "a relayed reply carries no reply_to");
+        assert!(
+            v["header"].get("reply_to").is_none(),
+            "a relayed reply carries no reply_to"
+        );
         assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
 
         // One-shot cleanup: entry removed + bridge topic unsubscribed + counted.
@@ -1214,15 +1365,27 @@ mod tests {
     async fn downlink_cmd_without_reply_to_is_relayed_untouched() {
         let (io, device, site) = started().await;
         // envelope() carries no reply_to: a fire-and-forget notification cmd.
-        site.publish(CMD_TOPIC, envelope(), Destination::Local, Qos::AtLeastOnce).await.unwrap();
+        site.publish(CMD_TOPIC, envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
 
         assert!(wait_until(|| !device.published().is_empty()).await);
         let (_, bytes) = device.published().remove(0);
         let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(v["header"].get("reply_to").is_none(), "no reply_to must be minted");
-        assert_eq!(io.pending_replies(), 0, "no correlation entry for a notification cmd");
         assert!(
-            !device.subscriptions().iter().any(|f| f.starts_with(BRIDGE_PREFIX)),
+            v["header"].get("reply_to").is_none(),
+            "no reply_to must be minted"
+        );
+        assert_eq!(
+            io.pending_replies(),
+            0,
+            "no correlation entry for a notification cmd"
+        );
+        assert!(
+            !device
+                .subscriptions()
+                .iter()
+                .any(|f| f.starts_with(BRIDGE_PREFIX)),
             "no bridge reply subscription for a notification cmd"
         );
         io.shutdown().await;
@@ -1232,8 +1395,11 @@ mod tests {
     async fn ttl_expiry_unsubscribes_the_bridge_topic_and_counts() {
         // ttlSecs 0: the entry is expired the moment it is recorded; the sweep
         // (100 ms floor cadence) tears it down.
-        let (io, device, site) =
-            started_with(ReplyConfig { ttl_secs: 0, max_pending: 1024 }).await;
+        let (io, device, site) = started_with(ReplyConfig {
+            ttl_secs: 0,
+            max_pending: 1024,
+        })
+        .await;
         let bridge_topic = downlink_request(&device, &site, SITE_REPLY, "corr-1").await;
 
         assert!(
@@ -1248,7 +1414,12 @@ mod tests {
 
         // A reply arriving after expiry goes nowhere near the site broker.
         device
-            .publish(&bridge_topic, envelope(), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                &bridge_topic,
+                envelope(),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1262,7 +1433,11 @@ mod tests {
 
     #[tokio::test]
     async fn max_pending_overflow_evicts_the_oldest_entry() {
-        let (io, device, site) = started_with(ReplyConfig { ttl_secs: 60, max_pending: 2 }).await;
+        let (io, device, site) = started_with(ReplyConfig {
+            ttl_secs: 60,
+            max_pending: 2,
+        })
+        .await;
         let bridge0 = downlink_request(&device, &site, "edgecommons/reply-site-0", "c0").await;
         let bridge1 = downlink_request(&device, &site, "edgecommons/reply-site-1", "c1").await;
         assert_eq!(io.pending_replies(), 2);
@@ -1279,7 +1454,10 @@ mod tests {
             wait_until(|| device.unsubscribed().contains(&bridge0)).await,
             "the evicted (oldest) bridge topic must be unsubscribed"
         );
-        assert!(!device.unsubscribed().contains(&bridge1), "younger entries survive");
+        assert!(
+            !device.unsubscribed().contains(&bridge1),
+            "younger entries survive"
+        );
 
         // The surviving second entry still round-trips.
         let reply = MessageBuilder::new("r", "1.0")
@@ -1288,9 +1466,16 @@ mod tests {
             .build()
             .to_vec()
             .unwrap();
-        device.publish(&bridge1, reply, Destination::Local, Qos::AtLeastOnce).await.unwrap();
+        device
+            .publish(&bridge1, reply, Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
         assert!(
-            wait_until(|| site.published().iter().any(|(t, _)| t == "edgecommons/reply-site-1")).await,
+            wait_until(|| site
+                .published()
+                .iter()
+                .any(|(t, _)| t == "edgecommons/reply-site-1"))
+            .await,
             "a surviving entry must still relay its reply"
         );
         io.shutdown().await;
@@ -1302,16 +1487,28 @@ mod tests {
         // The bridge cannot subscribe the minted reply topic: executing a cmd
         // whose reply can never return is worse than not relaying it.
         *device.fail_subscribe_prefix.lock().unwrap() = Some(BRIDGE_PREFIX.to_string());
-        site.publish(CMD_TOPIC, cmd_with_reply(SITE_REPLY, "corr-1"), Destination::Local, Qos::AtLeastOnce)
-            .await
-            .unwrap();
+        site.publish(
+            CMD_TOPIC,
+            cmd_with_reply(SITE_REPLY, "corr-1"),
+            Destination::Local,
+            Qos::AtLeastOnce,
+        )
+        .await
+        .unwrap();
 
         assert!(
             wait_until(|| io.counters().publish_failed.load(Ordering::Relaxed) == 1).await,
             "the failed reply path must be counted"
         );
-        assert!(device.published().is_empty(), "the cmd must NOT be relayed (fail closed)");
-        assert_eq!(io.pending_replies(), 0, "the abandoned entry must not linger to expiry");
+        assert!(
+            device.published().is_empty(),
+            "the cmd must NOT be relayed (fail closed)"
+        );
+        assert_eq!(
+            io.pending_replies(),
+            0,
+            "the abandoned entry must not linger to expiry"
+        );
         io.shutdown().await;
     }
 
@@ -1320,9 +1517,14 @@ mod tests {
         let (io, _device, site) = started().await;
         // The stray window: a reply delivered just before expiry/eviction tore
         // the entry down — drive the resolution path directly with no entry.
-        io.reply_proxy.handle_reply("edgecommons/reply-never-recorded", &envelope()).await;
+        io.reply_proxy
+            .handle_reply("edgecommons/reply-never-recorded", &envelope())
+            .await;
         assert_eq!(io.counters().reply_stray.load(Ordering::Relaxed), 1);
-        assert!(site.published().is_empty(), "a stray reply must not reach the site broker");
+        assert!(
+            site.published().is_empty(),
+            "a stray reply must not reach the site broker"
+        );
         assert_eq!(io.counters().reply_relayed.load(Ordering::Relaxed), 0);
         io.shutdown().await;
     }
@@ -1368,21 +1570,37 @@ mod tests {
         let (io, device, site) =
             started_uplink(json!({ "classes": { "log": { "enabled": false } } })).await;
         device
-            .publish("ecv1/gw-01/c/main/log/tail", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                "ecv1/gw-01/c/main/log/tail",
+                envelope(),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         assert!(
             wait_until(|| io.counters().dropped_disabled.get(UnsClass::Log) == 1).await,
             "the disabled-class drop must be counted"
         );
-        assert!(site.published().is_empty(), "a disabled class must not reach the site broker");
+        assert!(
+            site.published().is_empty(),
+            "a disabled class must not reach the site broker"
+        );
 
         // The other classes are unaffected.
         device
-            .publish("ecv1/gw-01/c/main/state", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                "ecv1/gw-01/c/main/state",
+                envelope(),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
-        assert!(wait_until(|| !site.published().is_empty()).await, "state must still relay");
+        assert!(
+            wait_until(|| !site.published().is_empty()).await,
+            "state must still relay"
+        );
         assert_eq!(io.counters().uplinked.total(), 1);
         assert_eq!(io.counters().dropped_disabled.total(), 1);
         io.shutdown().await;
@@ -1395,8 +1613,14 @@ mod tests {
         let (io, device, site) =
             started_uplink(json!({ "classes": { "app": { "enabled": true } } })).await;
         let topic = "ecv1/gw-01/my-app/main/app/chatter";
-        device.publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce).await.unwrap();
-        assert!(wait_until(|| !site.published().is_empty()).await, "opted-in app must relay");
+        device
+            .publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| !site.published().is_empty()).await,
+            "opted-in app must relay"
+        );
         assert_eq!(site.published()[0].0, topic);
         io.shutdown().await;
     }
@@ -1421,7 +1645,11 @@ mod tests {
             wait_until(|| io.counters().dropped_rate.get(UnsClass::Data) == 2).await,
             "the over-cap drops must be counted"
         );
-        assert_eq!(site.published().len(), 1, "only the burst token's message passes");
+        assert_eq!(
+            site.published().len(),
+            1,
+            "only the burst token's message passes"
+        );
         assert_eq!(io.counters().uplinked.get(UnsClass::Data), 1);
         io.shutdown().await;
     }
@@ -1432,15 +1660,30 @@ mod tests {
         site.set_connected(false);
 
         device
-            .publish("ecv1/gw-01/c/main/state", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                "ecv1/gw-01/c/main/state",
+                envelope(),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         device
-            .publish("ecv1/gw-01/c/main/data/temp", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                "ecv1/gw-01/c/main/data/temp",
+                envelope(),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         device
-            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                EVT_TOPIC,
+                evt_envelope(1),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
 
@@ -1452,9 +1695,16 @@ mod tests {
         );
         assert_eq!(io.counters().dropped_disconnected.get(UnsClass::State), 1);
         assert_eq!(io.counters().dropped_disconnected.get(UnsClass::Data), 1);
-        assert_eq!(io.counters().dropped_disconnected.get(UnsClass::Evt), 0, "evt buffers instead");
+        assert_eq!(
+            io.counters().dropped_disconnected.get(UnsClass::Evt),
+            0,
+            "evt buffers instead"
+        );
         assert_eq!(io.buffered_evt(), 1);
-        assert!(site.published().is_empty(), "nothing reaches a down site link");
+        assert!(
+            site.published().is_empty(),
+            "nothing reaches a down site link"
+        );
         io.shutdown().await;
     }
 
@@ -1464,7 +1714,12 @@ mod tests {
         site.set_connected(false);
         for n in 1..=3 {
             device
-                .publish(EVT_TOPIC, evt_envelope(n), Destination::Local, Qos::AtLeastOnce)
+                .publish(
+                    EVT_TOPIC,
+                    evt_envelope(n),
+                    Destination::Local,
+                    Qos::AtLeastOnce,
+                )
                 .await
                 .unwrap();
         }
@@ -1478,7 +1733,11 @@ mod tests {
             wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 3).await,
             "the buffered evt must replay on reconnect"
         );
-        assert_eq!(evt_ns_at_site(&site), vec![1, 2, 3], "replay is strictly in order");
+        assert_eq!(
+            evt_ns_at_site(&site),
+            vec![1, 2, 3],
+            "replay is strictly in order"
+        );
         assert_eq!(io.buffered_evt(), 0, "the buffer clears after replay");
         // The replayed bytes are the hop-stamped forward bytes (topic-verbatim
         // + the §2.3 hop tag — stamped before buffering).
@@ -1498,7 +1757,12 @@ mod tests {
         site.set_connected(false);
         for n in 1..=3 {
             device
-                .publish(EVT_TOPIC, evt_envelope(n), Destination::Local, Qos::AtLeastOnce)
+                .publish(
+                    EVT_TOPIC,
+                    evt_envelope(n),
+                    Destination::Local,
+                    Qos::AtLeastOnce,
+                )
                 .await
                 .unwrap();
         }
@@ -1513,7 +1777,11 @@ mod tests {
             wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 2).await,
             "the surviving evt must replay"
         );
-        assert_eq!(evt_ns_at_site(&site), vec![2, 3], "the OLDEST was the drop victim");
+        assert_eq!(
+            evt_ns_at_site(&site),
+            vec![2, 3],
+            "the OLDEST was the drop victim"
+        );
         io.shutdown().await;
     }
 
@@ -1525,7 +1793,12 @@ mod tests {
         .await;
         site.set_connected(false);
         device
-            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                EVT_TOPIC,
+                evt_envelope(1),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         assert!(
@@ -1545,16 +1818,28 @@ mod tests {
         site.set_fail_publish(true);
 
         device
-            .publish("ecv1/gw-01/c/main/state", envelope(), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                "ecv1/gw-01/c/main/state",
+                envelope(),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         device
-            .publish(EVT_TOPIC, evt_envelope(7), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                EVT_TOPIC,
+                evt_envelope(7),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         assert!(
-            wait_until(|| io.counters().dropped_disconnected.get(UnsClass::State) == 1
-                && io.counters().evt_buffered.load(Ordering::Relaxed) == 1)
+            wait_until(
+                || io.counters().dropped_disconnected.get(UnsClass::State) == 1
+                    && io.counters().evt_buffered.load(Ordering::Relaxed) == 1
+            )
             .await,
             "a failed publish must drop-count non-evt and buffer evt"
         );
@@ -1577,7 +1862,12 @@ mod tests {
         site.set_connected(false);
         for n in 1..=2 {
             device
-                .publish(EVT_TOPIC, evt_envelope(n), Destination::Local, Qos::AtLeastOnce)
+                .publish(
+                    EVT_TOPIC,
+                    evt_envelope(n),
+                    Destination::Local,
+                    Qos::AtLeastOnce,
+                )
                 .await
                 .unwrap();
         }
@@ -1597,7 +1887,11 @@ mod tests {
             wait_until(|| io.counters().evt_replayed.load(Ordering::Relaxed) == 2).await,
             "the retried replay must drain the buffer"
         );
-        assert_eq!(evt_ns_at_site(&site), vec![1, 2], "requeue-front preserves order");
+        assert_eq!(
+            evt_ns_at_site(&site),
+            vec![1, 2],
+            "requeue-front preserves order"
+        );
         assert_eq!(io.buffered_evt(), 0);
         assert_eq!(io.counters().evt_buffer_dropped.load(Ordering::Relaxed), 0);
         io.shutdown().await;
@@ -1613,10 +1907,18 @@ mod tests {
         let (io, device, site) = started().await;
         site.set_connected(false);
         device
-            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                EVT_TOPIC,
+                evt_envelope(1),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
-        assert!(wait_until(|| io.buffered_evt() == 1).await, "the evt must buffer while down");
+        assert!(
+            wait_until(|| io.buffered_evt() == 1).await,
+            "the evt must buffer while down"
+        );
         let before = device.published().len(); // the test's own evt publish
 
         site.set_connected(true);
@@ -1634,7 +1936,10 @@ mod tests {
         // Notification-style cmd envelopes: named, no reply_to, empty body.
         let v: Value = serde_json::from_slice(&bcasts[0].1).unwrap();
         assert_eq!(v["header"]["name"], "republish-state");
-        assert!(v["header"].get("reply_to").is_none(), "a broadcast expects no reply");
+        assert!(
+            v["header"].get("reply_to").is_none(),
+            "a broadcast expects no reply"
+        );
         assert_eq!(v["body"], json!({}));
         let v: Value = serde_json::from_slice(&bcasts[1].1).unwrap();
         assert_eq!(v["header"]["name"], "republish-cfg");
@@ -1651,13 +1956,21 @@ mod tests {
         // state at start), and neither is a mere failed-publish recovery.
         let (io, device, site) = started().await;
         tokio::time::sleep(Duration::from_millis(600)).await; // several watcher ticks
-        assert!(device.published().is_empty(), "no broadcast at plain startup");
+        assert!(
+            device.published().is_empty(),
+            "no broadcast at plain startup"
+        );
 
         // Failed-publish recovery without a connected() edge: the evt drains via
         // the pending>0 branch — still no broadcast.
         site.set_fail_publish(true);
         device
-            .publish(EVT_TOPIC, evt_envelope(1), Destination::Local, Qos::AtLeastOnce)
+            .publish(
+                EVT_TOPIC,
+                evt_envelope(1),
+                Destination::Local,
+                Qos::AtLeastOnce,
+            )
             .await
             .unwrap();
         assert!(wait_until(|| io.buffered_evt() == 1).await);

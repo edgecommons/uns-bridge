@@ -34,7 +34,7 @@ flowchart LR
     relayp["RELAY PRIMARY conn\n(raw provider, id …-relay)"]
   end
   subgraph site["Site UNS broker"]
-    sitec["SITE conn\n(reused MqttProvider + LWT)"]
+    sitec["SITE conn\n(reused MqttProvider + derived LWT)"]
   end
   runtime["edgecommons runtime:\nidentity · heartbeat state ·\ncfg announce · gg.metrics()"] --> obs
   engine["Relay engine + policy +\nreply proxy"] --> relayp
@@ -46,8 +46,8 @@ flowchart LR
 | Connection | Owner | Built from | Purpose |
 |---|---|---|---|
 | **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime | the standard `messaging` section of the config file (which doubles as the `--transport MQTT` payload) | the bridge's own identity, logging init, the heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` announce, `gg.metrics()`, and the library-owned SIGTERM/Ctrl-C shutdown signal |
-| **RELAY PRIMARY** (device bus) | the bridge | the same `messaging` section, with `-relay` appended to every client id and any `lwt` stripped | the raw byte relay, the reply proxy's device-side reply topics, and the reconnect rehydration broadcast |
-| **SITE** | the bridge | the bridge's own `component.instances[]` `"site"` entry, by reusing the edgecommons core's public `MqttProvider::connect` | the uplink target and downlink source; carries the Last-Will `UNREACHABLE` (LWT) |
+| **RELAY PRIMARY** (device bus) | the bridge | the same `messaging` section, with `-relay` appended to every client id | the raw byte relay, the reply proxy's device-side reply topics, and the reconnect rehydration broadcast |
+| **SITE** | the bridge | the bridge's own `component.instances[]` `"site"` entry, by reusing the edgecommons core's public MQTT provider with a bridge-derived Last-Will | the uplink target and downlink source; carries the private Last-Will `UNREACHABLE` contract |
 
 **Why two connections to the *same* device bus?** The relay must operate at the **raw provider level** —
 byte-verbatim, with *no* reserved-class publish guard — because it forwards messages other components
@@ -60,7 +60,7 @@ makes the broker evict them in a session-takeover loop), hence the `-relay` suff
 The elegant consequence: because the bridge's own `state`/`cfg`/`metric` traffic goes out on the
 OBSERVABILITY connection and *matches the relay's own uplink filters*, the bridge is relayed to the site
 broker **by itself**. The site sees the bridge exactly as it sees any other component — no special-casing —
-plus the one thing only the bridge sets: the site-connection LWT.
+plus the one thing only the bridge sets: the private site-connection Last-Will.
 
 ## The relay matrix — what crosses, and which way
 
@@ -184,12 +184,10 @@ All of it matches the uplink filters and is relayed by the bridge itself. Counte
 current values. See [reference/messaging-interface.md](reference/messaging-interface.md#metrics) for the full
 table.
 
-One more startup check falls out of the LWT: the **LWT cross-check**. The site LWT should fire on the
-bridge's *real* state topic so a UNREACHABLE lands where consumers actually listen. At startup the bridge
-template-resolves the configured `lwt.topic` and compares it to `gg.uns().topic(State)` (what the keepalive
-actually publishes on). A mismatch — the classic typo'd or unresolved device token — logs a **WARN**; a
-missing LWT also WARNs (whole-device reachability detection then doesn't work). The check is **advisory**:
-config stays authoritative and the configured value is still what gets registered.
+The site Last-Will is deliberately private to the bridge-console contract. At startup the bridge derives its
+real state topic from the resolved runtime identity (`gg.uns().topic(State)`) and registers
+`{"status":"UNREACHABLE"}` on that topic with QoS 1 on the site broker. There is no `lwt` knob to set; a
+configured `component.instances[site].lwt` is rejected so a typo cannot silently break console reachability.
 
 ## Platforms: where a bridge runs
 

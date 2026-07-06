@@ -6,25 +6,23 @@
 //! an adapter declares its OPC UA endpoints.
 //!
 //! The site entry reuses the library's existing `MessagingConfig`/`mqttBroker`
-//! shape verbatim ([`BrokerConfig`], [`LwtConfig`]) so the site connection is built
-//! by the **core's own** `MqttProvider::connect` — no new schema, no core change
-//! (DESIGN-uns-bridge §1.1/§1.2).
+//! shape for the broker endpoint ([`BrokerConfig`]). The site Last-Will is not
+//! configurable: the runtime derives it from the bridge's canonical UNS state
+//! topic and passes it explicitly to the core MQTT provider.
 //!
 //! The `uplink` block ([`UplinkConfig`]) is fully typed and enforced since P3-4
 //! (per-class enable/rate-caps + the D-B10 `evt` replay buffer —
 //! [`crate::policy`]); the `reply` knobs ([`ReplyConfig`]) are enforced since
-//! P3-3 (the `reply_to` rewrite, [`crate::reply`]). `lwt` is applied at CONNECT
-//! by the reused provider, and since P3-4b its topic is template-resolved and
-//! cross-checked against the bridge's real state topic at startup (§2.6/D-B11 —
-//! advisory WARN, [`crate::observability`]).
+//! P3-3 (the `reply_to` rewrite, [`crate::reply`]).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context;
-use edgecommons::messaging::config::{BrokerConfig, LwtConfig, Messaging, MessagingConfig};
+use edgecommons::messaging::config::{BrokerConfig, Messaging, MessagingConfig, QosConfig};
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::policy::DEFAULT_EVT_BUFFER_MAX;
 use crate::relay::DEFAULT_MAX_HOPS;
@@ -72,10 +70,6 @@ pub struct InstanceEntry {
     /// (host/port/clientId/credentials, TLS via cert paths).
     #[serde(default)]
     pub site_broker: Option<BrokerConfig>,
-    /// The site-connection LWT (§2.6) — the library's `messaging.lwt` shape,
-    /// applied verbatim by the reused `MqttProvider` at CONNECT on the site link.
-    #[serde(default)]
-    pub lwt: Option<LwtConfig>,
     /// Per-class uplink policy (§2.5): enables, rate caps, and the D-B10 `evt`
     /// replay buffer — enforced by [`crate::policy::UplinkPolicy`] since P3-4.
     #[serde(default)]
@@ -111,7 +105,11 @@ impl InstanceEntry {
             .clone()
             .with_context(|| format!("component.instances[{}] has no siteBroker", self.id))?;
         Ok(MessagingConfig {
-            messaging: Messaging { local: broker, iot_core: None, lwt: self.lwt.clone() },
+            messaging: Messaging {
+                local: broker,
+                northbound: None,
+                qos: QosConfig::default(),
+            },
         })
     }
 }
@@ -130,7 +128,10 @@ impl UplinkConfig {
     /// Consulted at [`crate::relay::RelayEngine`] construction — `app` off means
     /// the seventh filter is never even subscribed.
     pub fn app_enabled(&self) -> bool {
-        self.classes.get("app").and_then(|c| c.enabled).unwrap_or(false)
+        self.classes
+            .get("app")
+            .and_then(|c| c.enabled)
+            .unwrap_or(false)
     }
 }
 
@@ -176,7 +177,10 @@ pub struct DisconnectBufferConfig {
 
 impl Default for DisconnectBufferConfig {
     fn default() -> Self {
-        DisconnectBufferConfig { enabled: true, max_messages: DEFAULT_EVT_BUFFER_MAX }
+        DisconnectBufferConfig {
+            enabled: true,
+            max_messages: DEFAULT_EVT_BUFFER_MAX,
+        }
     }
 }
 
@@ -227,7 +231,10 @@ fn default_max_pending() -> usize {
 
 impl Default for ReplyConfig {
     fn default() -> Self {
-        ReplyConfig { ttl_secs: DEFAULT_REPLY_TTL_SECS, max_pending: DEFAULT_MAX_PENDING }
+        ReplyConfig {
+            ttl_secs: DEFAULT_REPLY_TTL_SECS,
+            max_pending: DEFAULT_MAX_PENDING,
+        }
     }
 }
 
@@ -253,7 +260,10 @@ fn default_queue() -> usize {
 
 impl Default for QueueConfig {
     fn default() -> Self {
-        QueueConfig { data: DEFAULT_DATA_QUEUE, default_depth: DEFAULT_QUEUE }
+        QueueConfig {
+            data: DEFAULT_DATA_QUEUE,
+            default_depth: DEFAULT_QUEUE,
+        }
     }
 }
 
@@ -264,28 +274,51 @@ impl BridgeConfig {
         let bytes = tokio::fs::read(path)
             .await
             .with_context(|| format!("reading bridge config {}", path.display()))?;
-        serde_json::from_slice(&bytes)
+        let value: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("parsing bridge config {}", path.display()))?;
+        Self::reject_configured_lwt(&value)?;
+        serde_json::from_value(value)
             .with_context(|| format!("parsing bridge config {}", path.display()))
     }
 
+    fn reject_configured_lwt(value: &Value) -> anyhow::Result<()> {
+        let Some(instances) = value
+            .get("component")
+            .and_then(|component| component.get("instances"))
+            .and_then(Value::as_array)
+        else {
+            return Ok(());
+        };
+
+        for instance in instances {
+            if instance.get("lwt").is_some() {
+                let id = instance
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<missing id>");
+                anyhow::bail!(
+                    "component.instances[{id}].lwt is not configurable; uns-bridge derives the site Last-Will from its canonical UNS state topic for the console contract"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The relay's own raw device-bus connection config: the standard `messaging`
-    /// section with `-relay` appended to every client id, and no LWT.
+    /// section with `-relay` appended to every client id.
     ///
     /// Since P3-4b the bridge holds **two** device-bus connections (README
     /// "Connections"): the EdgeCommons runtime builds the observability connection
     /// from the config **file** (this same `messaging` section — it doubles as the
     /// `--transport MQTT` payload), and the relay holds this second raw one. The
     /// suffix keeps the two MQTT client ids distinct (a shared id makes the broker
-    /// bounce the clients in a session-takeover loop); a configured `messaging.lwt`
-    /// belongs to the runtime's connection and is stripped here so the will is
-    /// never registered twice.
+    /// bounce the clients in a session-takeover loop).
     pub fn relay_primary_messaging(&self) -> MessagingConfig {
         let mut messaging = self.messaging.clone();
         messaging.local.client_id = format!("{}-relay", messaging.local.client_id);
-        if let Some(iot) = messaging.iot_core.as_mut() {
-            iot.client_id = format!("{}-relay", iot.client_id);
+        if let Some(northbound) = messaging.northbound.as_mut() {
+            northbound.client_id = format!("{}-relay", northbound.client_id);
         }
-        messaging.lwt = None;
         MessagingConfig { messaging }
     }
 
@@ -296,13 +329,19 @@ impl BridgeConfig {
     /// When no entry qualifies, or several entries carry a `siteBroker` and none
     /// is named `"site"` (ambiguous).
     pub fn site_instance(&self) -> anyhow::Result<&InstanceEntry> {
-        if let Some(entry) =
-            self.component.instances.iter().find(|i| i.id == SITE_INSTANCE_ID)
+        if let Some(entry) = self
+            .component
+            .instances
+            .iter()
+            .find(|i| i.id == SITE_INSTANCE_ID)
         {
             return Ok(entry);
         }
-        let mut with_broker =
-            self.component.instances.iter().filter(|i| i.site_broker.is_some());
+        let mut with_broker = self
+            .component
+            .instances
+            .iter()
+            .filter(|i| i.site_broker.is_some());
         match (with_broker.next(), with_broker.next()) {
             (Some(entry), None) => Ok(entry),
             (Some(_), Some(_)) => anyhow::bail!(
@@ -336,8 +375,6 @@ mod tests {
                   "siteBroker": { "host": "site-broker.dallas.example", "port": 8883,
                                   "clientId": "uns-bridge-site",
                                   "credentials": { "certPath": "c.pem", "keyPath": "k.pem", "caPath": "ca.pem" } },
-                  "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state",
-                           "payload": { "status": "UNREACHABLE" }, "qos": 1 },
                   "uplink": { "classes": { "app": { "enabled": true },
                                             "data": { "enabled": true, "maxRatePerSec": 200, "burst": 400 } } },
                   "reply": { "ttlSecs": 60, "maxPending": 1024 },
@@ -375,11 +412,20 @@ mod tests {
         let uplink = &cfg.site_instance().unwrap().uplink;
         assert_eq!(uplink.classes["log"].enabled, Some(false));
         assert_eq!(uplink.classes["metric"].max_rate_per_sec, Some(50));
-        assert_eq!(uplink.classes["metric"].burst, None, "burst defaults to 2x rate downstream");
+        assert_eq!(
+            uplink.classes["metric"].burst, None,
+            "burst defaults to 2x rate downstream"
+        );
         assert_eq!(uplink.classes["data"].max_rate_per_sec, Some(200));
         assert_eq!(uplink.classes["data"].burst, Some(400));
-        let buf = uplink.classes["evt"].buffer_while_disconnected.as_ref().unwrap();
-        assert!(buf.enabled, "enabled defaults true when only maxMessages is given");
+        let buf = uplink.classes["evt"]
+            .buffer_while_disconnected
+            .as_ref()
+            .unwrap();
+        assert!(
+            buf.enabled,
+            "enabled defaults true when only maxMessages is given"
+        );
         assert_eq!(buf.max_messages, 1000);
         assert!(!uplink.app_enabled());
     }
@@ -395,7 +441,10 @@ mod tests {
             } }"#,
         )
         .unwrap();
-        let buf = uplink.classes["evt"].buffer_while_disconnected.as_ref().unwrap();
+        let buf = uplink.classes["evt"]
+            .buffer_while_disconnected
+            .as_ref()
+            .unwrap();
         assert!(buf.enabled);
         assert_eq!(buf.max_messages, DEFAULT_EVT_BUFFER_MAX);
         assert_eq!(uplink.classes["data"].enabled, Some(true));
@@ -406,16 +455,19 @@ mod tests {
     }
 
     #[test]
-    fn site_messaging_reuses_the_core_config_shape() {
+    fn site_messaging_uses_core_broker_shape_without_configurable_lwt() {
         let cfg: BridgeConfig = serde_json::from_str(FULL).unwrap();
-        let mc = cfg.site_instance().unwrap().site_messaging().unwrap();
-        assert_eq!(mc.messaging.local.resolved_host().unwrap(), "site-broker.dallas.example");
+        let site = cfg.site_instance().unwrap();
+        let mc = site.site_messaging().unwrap();
+        assert_eq!(
+            mc.messaging.local.resolved_host().unwrap(),
+            "site-broker.dallas.example"
+        );
         assert_eq!(mc.messaging.local.port, 8883);
-        assert!(mc.messaging.iot_core.is_none(), "no iotCore on the site link");
-        let lwt = mc.messaging.lwt.expect("lwt rides into the reused provider config");
-        assert_eq!(lwt.topic, "ecv1/gw-01/uns-bridge/main/state");
-        assert_eq!(lwt.payload_bytes(), br#"{"status":"UNREACHABLE"}"#);
-        assert_eq!(lwt.qos_or_default(), 1);
+        assert!(
+            mc.messaging.northbound.is_none(),
+            "no northbound broker on the site link"
+        );
     }
 
     #[test]
@@ -427,8 +479,7 @@ mod tests {
         // The EdgeCommons runtime connects with the CONFIGURED id (from the file);
         // the relay's raw connection must never collide with it.
         assert_eq!(mc.messaging.local.client_id, "uns-bridge-local-relay");
-        assert!(mc.messaging.iot_core.is_none());
-        assert!(mc.messaging.lwt.is_none(), "a device-bus LWT belongs to the runtime connection");
+        assert!(mc.messaging.northbound.is_none());
     }
 
     #[test]
@@ -449,7 +500,6 @@ mod tests {
         assert_eq!(site.queue.default_depth, DEFAULT_QUEUE);
         assert_eq!(site.reply.ttl_secs, DEFAULT_REPLY_TTL_SECS);
         assert_eq!(site.reply.max_pending, DEFAULT_MAX_PENDING);
-        assert!(site.site_messaging().unwrap().messaging.lwt.is_none());
     }
 
     #[test]
@@ -514,7 +564,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(entry_without_broker.site_instance().unwrap().site_messaging().is_err());
+        assert!(entry_without_broker
+            .site_instance()
+            .unwrap()
+            .site_messaging()
+            .is_err());
     }
 
     #[tokio::test]
@@ -529,7 +583,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_rejects_configurable_site_lwt() {
+        let dir = std::env::temp_dir().join(format!("uns-bridge-cfg-lwt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{ "messaging": { "local": { "host": "h", "port": 1883, "clientId": "c" } },
+                 "component": { "instances": [
+                   { "id": "site",
+                     "siteBroker": { "host": "s", "port": 1884, "clientId": "cs" },
+                     "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state" } }
+                 ] } }"#,
+        )
+        .unwrap();
+
+        let err = BridgeConfig::load(&path).await.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("component.instances[site].lwt is not configurable"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn load_missing_file_is_an_error() {
-        assert!(BridgeConfig::load("/no/such/uns-bridge-config.json").await.is_err());
+        assert!(BridgeConfig::load("/no/such/uns-bridge-config.json")
+            .await
+            .is_err());
     }
 }

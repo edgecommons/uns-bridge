@@ -32,13 +32,6 @@
           "port": 1884,
           "clientId": "uns-bridge-site"
         },
-        "lwt": {
-          "topic": "ecv1/gw-01/uns-bridge/main/state",
-          "payload": {
-            "status": "UNREACHABLE"
-          },
-          "qos": 1
-        },
         "uplink": {
           "classes": {
             "state": {

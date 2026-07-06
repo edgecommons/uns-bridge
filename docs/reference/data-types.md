@@ -127,13 +127,14 @@ answers by re-announcing its state keepalive and effective cfg. Answering is bui
 
 ## The LWT payload
 
-The site Last-Will is a normal MQTT will registered by the reused provider on the site connection:
+The site Last-Will is a normal MQTT will registered by the reused provider on the site connection. It is
+derived by the bridge, not configured:
 
 | Field | Value |
 |-------|-------|
-| topic | `ecv1/{device}/uns-bridge/main/state` (must equal the bridge's real state topic) |
-| payload | conventionally `{ "status": "UNREACHABLE" }` |
-| qos | as configured (sample: `1`) |
+| topic | `ecv1/{device}/uns-bridge/main/state` (the bridge's resolved state topic) |
+| payload | `{ "status": "UNREACHABLE" }` |
+| qos | `1` |
 
 Because the will lands on the bridge's own `state` topic, a site console tracking `ecv1/+/+/+/state` sees the
 whole device flip to UNREACHABLE on an abrupt bridge/device death — no bespoke plumbing.

@@ -3,16 +3,16 @@
 **One `uns-bridge` per device bus**: an envelope-aware relay between the device-local bus and the
 **site UNS broker**, making the logical [Unified Namespace](https://github.com/edgecommons/edgecommons)
 (`ecv1/{device}/{component}/{instance}/{class}[/channel]`) a real **site-wide** bus. Each device has
-its own bus (a local MQTT broker on HOST; the Nucleus IPC bus on GREENGRASS) with no cross-device
-visibility — the bridge subscribes the device's UNS traffic, republishes it **topic-verbatim** onto
-the site broker under the device's namespace, and relays commands back down. Any site-scoped
+its own bus (a local MQTT broker on HOST or GREENGRASS) with no cross-device visibility — the bridge
+subscribes the device's UNS traffic, republishes it **topic-verbatim** onto the site broker under the
+device's namespace, and relays commands back down. Any site-scoped
 consumer (a historian, an MES bridge, the edge console) then connects to **one** bus.
 
 Unlike a dumb broker bridge it is envelope-aware: it stamps a **hop tag** for loop protection,
 rewrites `reply_to` so site→device request/reply crosses the bridge (the TTL'd correlation map,
 §2.4), applies a **per-class uplink policy** — enables, token-bucket rate caps, and a bounded
-`evt` replay buffer for WAN blips (§2.5 / D-B10) — and registers a Last-Will `UNREACHABLE` on the
-site connection for fast whole-device reachability detection.
+`evt` replay buffer for WAN blips (§2.5 / D-B10) — and derives a private site Last-Will
+`UNREACHABLE` for fast whole-device reachability detection.
 
 Design source of truth: `docs/platform/DESIGN-uns-bridge.md` (and `DESIGN-uns.md` §9) in the
 edgecommons monorepo. Section references below (§…) point there.
@@ -26,8 +26,8 @@ connections:
 | Connection | What | Built from |
 |---|---|---|
 | **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime: identity, the automatic heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` publisher, `gg.metrics()` (`metricEmission.target = "messaging"`), logging init, SIGTERM handling | the standard `messaging` config section — the config file doubles as the `--transport MQTT` payload |
-| **RELAY PRIMARY** (device bus) | the raw byte relay (§1.3) + reply proxy + rehydration broadcast | the same `messaging` section with the client id suffixed **`-relay`** (two MQTT clients must not share an id) and any `lwt` stripped (the will belongs to the runtime connection) |
-| **SITE** | the site UNS broker — the bridge's **external system**; carries the D-B11 LWT | the bridge's own `component.instances[]` `"site"` entry, by **reusing the edgecommons core's public MQTT objects**: `MqttProvider::connect(&site_cfg)` — zero library change |
+| **RELAY PRIMARY** (device bus) | the raw byte relay (§1.3) + reply proxy + rehydration broadcast | the same `messaging` section with the client id suffixed **`-relay`** (two MQTT clients must not share an id) |
+| **SITE** | the site UNS broker — the bridge's **external system**; carries the private bridge-console D-B11 LWT | the bridge's own `component.instances[]` `"site"` entry for the broker endpoint; the bridge derives the LWT from its canonical state topic and passes it to `MqttProvider::connect_with_last_will` |
 
 Why two device-bus connections: `EdgeCommons` deliberately does **not** expose its raw
 `MessagingProvider` (`DefaultMessagingService` keeps it private), and the relay must stay at the
@@ -134,7 +134,7 @@ decision:
 Nothing bespoke: the heartbeat publishes the bridge's `state` keepalive on the device bus, the
 `cfg` publisher announces its (redacted) effective config, and the §2.5 counters emit as
 `metric`s — all of it matches the uplink filters and is **relayed by the bridge itself**, so the
-site broker sees the bridge exactly as it sees any component (plus the LWT only it sets).
+site broker sees the bridge exactly as it sees any component (plus the private LWT only it sets).
 
 Every **30 s** a task snapshots the relay counters and emits them through `gg.metrics()`
 (`ecv1/{device}/uns-bridge/main/metric/<name>` with the shipped `messaging` target). Counters emit
@@ -147,19 +147,17 @@ Every **30 s** a task snapshots the relay counters and emits them through `gg.me
 | `relay_pending_replies` | `count` | gauge |
 | `site_connected` | `connected` (0/1) | gauge |
 
-**LWT startup cross-check** (§2.6/§3.7, D-B11): at startup the bridge template-resolves the
-configured site `lwt.topic` and compares it against its **real** state topic
-(`gg.uns().topic(State)` — what the keepalive actually publishes on). A mismatch (the classic
-misconfig: a typo'd or unsanitized device token) logs a **WARN**; a missing site LWT also WARNs
-(whole-device UNREACHABLE detection would not work). The check is advisory — config stays
-authoritative and the configured value is still what gets registered.
+**Site LWT** (§2.6/§3.7, D-B11): at startup the bridge derives the site Last-Will topic from its
+**real** state topic (`gg.uns().topic(State)` — what the keepalive actually publishes on). Payload is
+fixed to `{"status":"UNREACHABLE"}`, QoS is fixed to 1, and retain remains disabled in the provider.
+This is a private bridge-console contract, not user configuration.
 
 ## Configuration (§2.7)
 
 The site broker lives in the bridge's **own** `component.instances[]` — the existing per-instance
 surface every component has (exactly how the opcua-adapter declares its OPC UA endpoints), reusing
-the library's `MessagingConfig`/`mqttBroker` shape (including `lwt`). No schema change, no core
-change. See [`test-configs/config.json`](test-configs/config.json) for a complete sample
+the library's `mqttBroker` shape for the endpoint. The site LWT is derived by the bridge and must not
+be configured. See [`test-configs/config.json`](test-configs/config.json) for a complete sample
 (device broker `:1883`, site broker `:1884` — the dual-EMQX dev layout):
 
 ```jsonc
@@ -177,8 +175,6 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
         "siteBroker": { "host": "site-broker.dallas.example", "port": 8883,
                         "clientId": "uns-bridge-gw-01",
                         "credentials": { "certPath": "…", "keyPath": "…", "caPath": "…" } },
-        "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state",     // §2.6: whole-device UNREACHABLE
-                 "payload": { "status": "UNREACHABLE" }, "qos": 1 },
         "uplink": { "classes": {                                  // §2.5 per-class policy (all knobs optional)
             "log":  { "enabled": false },
             "metric": { "maxRatePerSec": 50 },                    // burst defaults to 2× rate
@@ -195,12 +191,10 @@ change. See [`test-configs/config.json`](test-configs/config.json) for a complet
 
 Notes for the current slice: the config file is validated against the **canonical edgecommons
 schema** at startup (the runtime loads it via `-c FILE`) — a shipped-config test pins that it
-passes. Template substitution (`{ThingName}` → the sanitized device token) is resolved for the
-**site `lwt.topic` only** (the load-bearing case, §1.2); templates elsewhere in the `instances[]`
-entry stay literal until the full facade integration. The `lwt` entry is applied at CONNECT by
-the reused provider and cross-checked at startup (D-B11, above); the `uplink` policy (§2.5 /
-D-B10) and the `reply` knobs (§2.4) are fully enforced; the counters publish as `metric`s every
-30 s (§2.8, above) and are still logged once at shutdown.
+passes. The bridge rejects `component.instances[site].lwt`; the private site LWT is derived from the
+runtime's state topic at startup. The `uplink` policy (§2.5 / D-B10) and the `reply` knobs (§2.4)
+are fully enforced; the counters publish as `metric`s every 30 s (§2.8, above) and are still logged
+once at shutdown.
 
 ## Run locally (HOST)
 
@@ -288,10 +282,10 @@ The bridge and the site broker deploy **as a pair** — see
 | `src/relay.rs` | The **pure** relay decision engine: §2.2 class routing + own-device pinning, §2.3 hop tag, the §9.3 rehydration-topic derivation — no IO, fully unit-tested |
 | `src/reply.rs` | The **pure** §2.4 reply proxy logic: the TTL'd correlation map (`rewrite_downlink`/`take`/`sweep`, evict-oldest) + the reply back-haul transform — no IO, injected clock |
 | `src/policy.rs` | The **pure** §2.5/D-B10 uplink policy: per-class enables, token buckets (injected clock), and the bounded drop-oldest `evt` replay buffer — no IO |
-| `src/observability.rs` | The **pure** §2.8 pieces: the counter→metric mapping (snapshot deltas → named measure groups) + the D-B11 LWT cross-check — no IO |
+| `src/observability.rs` | The **pure** §2.8 pieces: the counter→metric mapping (snapshot deltas → named measure groups) — no IO |
 | `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (rising-edge rehydration broadcast + evt replay) + the 30 s metric emission; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
 | `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; the relay's `-relay`-suffixed device connection; typed `reply` + `uplink` knobs |
-| `src/main.rs` | The EdgeCommons runtime (observability) + the relay's raw connections (device fatal, site retried), the D-B11 LWT cross-check, graceful stop |
+| `src/main.rs` | The EdgeCommons runtime (observability) + the relay's raw connections (device fatal, site retried), private derived site LWT, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `tests/e2e_dual_broker.rs`, `tests/e2e/` | The P3-6 **dual-EMQX end-to-end test** (real binary between two real brokers, assertions A–F above) + its rig (`run.sh`, `docker-compose.e2e.yml`) |
 | `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs for the **bridge itself** (finalized with the GREENGRASS/IPC variant follow-up) |
@@ -304,7 +298,7 @@ The bridge and the site broker deploy **as a pair** — see
 | **P3-2** | repo scaffold; relay engine (six uplink filters + pinned downlink, topic-verbatim, hop tag/maxHops); unit tests over trait fakes | **done** |
 | **P3-3** | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | **done** |
 | **P3-4** | per-class uplink policy: enables, token-bucket rate caps, D-B10 disconnect behavior + the bounded drop-oldest `evt` replay buffer with in-order reconnect replay; per-class drop counters | **done** |
-| **P3-4b** | the bridge's own EdgeCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); the D-B11 LWT startup cross-check; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
+| **P3-4b** | the bridge's own EdgeCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); private derived D-B11 site LWT; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
 | **P3-5** | `deploy/site-broker/` recipes (HOST compose + dual-EMQX dev rig, GG DockerApplicationManager, k8s in-cluster broker + boundary-bridge example, the per-device **ACL** file, TLS notes) | **done** |
 | **P3-6** | the repeatable **dual-EMQX bridge-level e2e** (`tests/e2e/run.sh` — real binary between two real brokers, 9/9 assertions A–F green) + the `edgecommons/registry` catalog entry (`category: bridge`) | **done** |
 

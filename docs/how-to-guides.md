@@ -49,21 +49,15 @@ deploy **as a pair**.
 
 ---
 
-## Register a Last-Will for whole-device reachability
+## Understand the automatic site Last-Will
 
-An abrupt device/bridge death is invisible unless the broker announces it. Configure a Last-Will on the site
-connection that publishes `UNREACHABLE` on the bridge's **own state topic**, so a site console watching
-`ecv1/+/+/+/state` sees the device go dark immediately:
+An abrupt device/bridge death is invisible unless the broker announces it. The bridge automatically registers
+a Last-Will on the site connection that publishes `{"status":"UNREACHABLE"}` on the bridge's **own state
+topic**, so a site console watching `ecv1/+/+/+/state` sees the device go dark immediately.
 
-```jsonc
-"lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state", "payload": { "status": "UNREACHABLE" }, "qos": 1 }
-```
-
-The topic **must** equal the bridge's real state topic (`ecv1/{device}/uns-bridge/main/state`) — otherwise the
-broker publishes UNREACHABLE where no one listens. The bridge template-resolves `{ThingName}` in this topic
-and cross-checks it at startup; a mismatch (or a missing LWT) logs a **WARN** but never fails the bridge (the
-check is advisory — config stays authoritative). Watch the startup logs for `site LWT topic ... does NOT match`
-to catch a typo.
+The topic is derived from the resolved runtime identity: `ecv1/{device}/uns-bridge/main/state`. Do not add an
+`lwt` object under `component.instances[site]`; the bridge rejects it because this is a private bridge-console
+contract and a misconfigured topic would break console reachability.
 
 ---
 

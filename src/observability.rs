@@ -2,17 +2,14 @@
 //!
 //! **One-liner purpose**: The **pure, IO-free** halves of the bridge's own
 //! observability: the counter→metric mapping (a [`RelaySnapshot`] pair →
-//! named measure/value groups for `gg.metrics()`, the §2.5 metric table) and the
-//! §2.6/§3.7 **D-B11 LWT startup cross-check** (configured site LWT topic vs the
-//! bridge's real state topic).
+//! named measure/value groups for `gg.metrics()`, the §2.5 metric table).
 //!
 //! (Section references are to `docs/platform/DESIGN-uns-bridge.md` in the edgecommons
 //! monorepo.)
 //!
 //! The IO halves live elsewhere: [`crate::io`] snapshots the live
 //! [`crate::io::RelayCounters`] and emits the groups through the edgecommons
-//! `MetricService` on a fixed cadence; [`crate::main`] runs the LWT cross-check at
-//! startup (WARN on mismatch — advisory, config stays authoritative, D-B11).
+//! `MetricService` on a fixed cadence.
 //!
 //! ## The metric mapping (§2.5 table + the P3-4b additions)
 //!
@@ -146,10 +143,18 @@ pub struct MetricGroup {
 pub fn metric_definitions() -> Vec<MetricDef> {
     let mut defs = Vec::with_capacity(CLASS_FAMILIES.len() + SCALAR_COUNTERS.len() + 2);
     for (name, _) in CLASS_FAMILIES {
-        defs.push(MetricDef { name, measures: CLASS_MEASURES.to_vec(), unit: "Count" });
+        defs.push(MetricDef {
+            name,
+            measures: CLASS_MEASURES.to_vec(),
+            unit: "Count",
+        });
     }
     for (name, _) in SCALAR_COUNTERS {
-        defs.push(MetricDef { name, measures: vec![COUNT_MEASURE], unit: "Count" });
+        defs.push(MetricDef {
+            name,
+            measures: vec![COUNT_MEASURE],
+            unit: "Count",
+        });
     }
     defs.push(MetricDef {
         name: PENDING_REPLIES_METRIC,
@@ -200,71 +205,6 @@ pub fn relay_metric_groups(prev: &RelaySnapshot, curr: &RelaySnapshot) -> Vec<Me
     groups
 }
 
-/// The verdict of the §2.6/§3.7 **D-B11 LWT startup cross-check**: does the
-/// configured site-connection LWT topic equal the bridge's real state topic
-/// (`ecv1/{device}/uns-bridge/main/state` — what the heartbeat keepalive
-/// actually publishes on)? Advisory only — config stays authoritative.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LwtCrossCheck {
-    /// The configured LWT topic equals the bridge's real state topic.
-    Match,
-    /// The classic misconfig (§2.6): a typo'd / unresolved / unsanitized topic —
-    /// the broker would publish `UNREACHABLE` where no consumer listens.
-    Mismatch {
-        /// The (template-resolved) configured `lwt.topic`.
-        configured: String,
-        /// The bridge's real state topic.
-        expected: String,
-    },
-    /// No site LWT configured at all — the site cannot detect whole-device
-    /// unreachability (the load-bearing D9/§9.3 LWT use is missing).
-    NotConfigured {
-        /// The topic a site LWT should be configured with.
-        expected: String,
-    },
-}
-
-/// Pure D-B11 cross-check: compare the configured site `lwt.topic` (already
-/// template-resolved by the caller) against the bridge's real state topic.
-pub fn check_lwt_topic(configured: Option<&str>, expected: &str) -> LwtCrossCheck {
-    match configured {
-        None => LwtCrossCheck::NotConfigured { expected: expected.to_string() },
-        Some(topic) if topic == expected => LwtCrossCheck::Match,
-        Some(topic) => LwtCrossCheck::Mismatch {
-            configured: topic.to_string(),
-            expected: expected.to_string(),
-        },
-    }
-}
-
-/// Log the [`check_lwt_topic`] verdict (§2.6: **WARN on mismatch**, do not fail —
-/// the check is advisory and config remains authoritative; a missing LWT also
-/// WARNs because whole-device reachability detection then does not work).
-pub fn log_lwt_cross_check(check: &LwtCrossCheck) {
-    match check {
-        LwtCrossCheck::Match => {
-            tracing::info!("site LWT topic matches the bridge's state topic");
-        }
-        LwtCrossCheck::Mismatch { configured, expected } => {
-            tracing::warn!(
-                configured = %configured,
-                expected = %expected,
-                "site LWT topic does NOT match the bridge's real state topic — the broker \
-                 would publish UNREACHABLE where no consumer listens; fix \
-                 component.instances[site].lwt.topic (advisory, D-B11 — config stays \
-                 authoritative)"
-            );
-        }
-        LwtCrossCheck::NotConfigured { expected } => {
-            tracing::warn!(
-                expected = %expected,
-                "no site LWT configured — the site broker cannot signal whole-device \
-                 UNREACHABLE (§2.6/D-B11); add component.instances[site].lwt with this topic"
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,7 +234,10 @@ mod tests {
     }
 
     fn group<'a>(groups: &'a [MetricGroup], name: &str) -> &'a MetricGroup {
-        groups.iter().find(|g| g.name == name).unwrap_or_else(|| panic!("missing {name}"))
+        groups
+            .iter()
+            .find(|g| g.name == name)
+            .unwrap_or_else(|| panic!("missing {name}"))
     }
 
     // ---- the counter→metric mapping (§2.5 table) ----
@@ -302,7 +245,11 @@ mod tests {
     #[test]
     fn class_measures_match_the_policy_class_tokens() {
         let tokens: Vec<&str> = POLICY_CLASSES.iter().map(|c| c.token()).collect();
-        assert_eq!(tokens, CLASS_MEASURES.to_vec(), "measure order must be POLICY_CLASSES order");
+        assert_eq!(
+            tokens,
+            CLASS_MEASURES.to_vec(),
+            "measure order must be POLICY_CLASSES order"
+        );
     }
 
     #[test]
@@ -337,9 +284,15 @@ mod tests {
         assert_eq!(up.values.len(), 7);
         assert_eq!(up.values["state"], 101.0);
         assert_eq!(up.values["app"], 107.0);
-        assert_eq!(group(&groups, "relay_dropped_disabled").values["cfg"], 202.0);
+        assert_eq!(
+            group(&groups, "relay_dropped_disabled").values["cfg"],
+            202.0
+        );
         assert_eq!(group(&groups, "relay_dropped_rate").values["evt"], 303.0);
-        assert_eq!(group(&groups, "relay_dropped_disconnected").values["log"], 406.0);
+        assert_eq!(
+            group(&groups, "relay_dropped_disconnected").values["log"],
+            406.0
+        );
 
         // Scalars land on the `count` measure with the right (distinct) values.
         for (name, want) in [
@@ -356,13 +309,23 @@ mod tests {
             ("relay_evt_replayed", 511.0),
         ] {
             let g = group(&groups, name);
-            assert_eq!(g.values.len(), 1, "{name} carries exactly the count measure");
+            assert_eq!(
+                g.values.len(),
+                1,
+                "{name} carries exactly the count measure"
+            );
             assert_eq!(g.values[COUNT_MEASURE], want, "{name}");
         }
 
         // Gauges: current values, not deltas.
-        assert_eq!(group(&groups, PENDING_REPLIES_METRIC).values[COUNT_MEASURE], 512.0);
-        assert_eq!(group(&groups, SITE_CONNECTED_METRIC).values[CONNECTED_MEASURE], 1.0);
+        assert_eq!(
+            group(&groups, PENDING_REPLIES_METRIC).values[COUNT_MEASURE],
+            512.0
+        );
+        assert_eq!(
+            group(&groups, SITE_CONNECTED_METRIC).values[CONNECTED_MEASURE],
+            1.0
+        );
     }
 
     #[test]
@@ -377,14 +340,24 @@ mod tests {
 
         let groups = relay_metric_groups(&prev, &curr);
         assert_eq!(group(&groups, "relay_uplinked").values["state"], 5.0);
-        assert_eq!(group(&groups, "relay_uplinked").values["cfg"], 0.0, "unchanged → 0 delta");
-        assert_eq!(group(&groups, "relay_downlinked").values[COUNT_MEASURE], 3.0);
+        assert_eq!(
+            group(&groups, "relay_uplinked").values["cfg"],
+            0.0,
+            "unchanged → 0 delta"
+        );
+        assert_eq!(
+            group(&groups, "relay_downlinked").values[COUNT_MEASURE],
+            3.0
+        );
         assert_eq!(
             group(&groups, PENDING_REPLIES_METRIC).values[COUNT_MEASURE],
             9.0,
             "gauge is the CURRENT value, not a delta"
         );
-        assert_eq!(group(&groups, SITE_CONNECTED_METRIC).values[CONNECTED_MEASURE], 0.0);
+        assert_eq!(
+            group(&groups, SITE_CONNECTED_METRIC).values[CONNECTED_MEASURE],
+            0.0
+        );
     }
 
     #[test]
@@ -392,7 +365,10 @@ mod tests {
         // A counter that appears to go backwards (process restart) must never
         // produce a negative/underflowed delta.
         let groups = relay_metric_groups(&distinct(), &RelaySnapshot::default());
-        assert_eq!(group(&groups, "relay_downlinked").values[COUNT_MEASURE], 0.0);
+        assert_eq!(
+            group(&groups, "relay_downlinked").values[COUNT_MEASURE],
+            0.0
+        );
         assert_eq!(group(&groups, "relay_uplinked").values["state"], 0.0);
     }
 
@@ -407,45 +383,21 @@ mod tests {
             let mut emitted: Vec<&str> = group.values.keys().map(String::as_str).collect();
             defined.sort_unstable();
             emitted.sort_unstable();
-            assert_eq!(defined, emitted, "{}: defined measures == emitted measures", def.name);
+            assert_eq!(
+                defined, emitted,
+                "{}: defined measures == emitted measures",
+                def.name
+            );
         }
         // Units: 0/1 flag is `None`, everything else counts.
         for def in &defs {
-            let want = if def.name == SITE_CONNECTED_METRIC { "None" } else { "Count" };
+            let want = if def.name == SITE_CONNECTED_METRIC {
+                "None"
+            } else {
+                "Count"
+            };
             assert_eq!(def.unit, want, "{}", def.name);
         }
-    }
-
-    // ---- the D-B11 LWT startup cross-check (§2.6/§3.7) ----
-
-    const EXPECTED: &str = "ecv1/gw-01/uns-bridge/main/state";
-
-    #[test]
-    fn lwt_cross_check_matches_the_real_state_topic() {
-        let check = check_lwt_topic(Some(EXPECTED), EXPECTED);
-        assert_eq!(check, LwtCrossCheck::Match);
-        log_lwt_cross_check(&check); // the INFO path
-    }
-
-    #[test]
-    fn lwt_cross_check_flags_a_mismatch_for_the_warn_path() {
-        // The classic misconfig: an unresolved template / unsanitized literal.
-        let check = check_lwt_topic(Some("ecv1/{ThingName}/uns-bridge/main/state"), EXPECTED);
-        assert_eq!(
-            check,
-            LwtCrossCheck::Mismatch {
-                configured: "ecv1/{ThingName}/uns-bridge/main/state".to_string(),
-                expected: EXPECTED.to_string(),
-            }
-        );
-        log_lwt_cross_check(&check); // the WARN path (advisory — never fails)
-    }
-
-    #[test]
-    fn lwt_cross_check_flags_a_missing_lwt() {
-        let check = check_lwt_topic(None, EXPECTED);
-        assert_eq!(check, LwtCrossCheck::NotConfigured { expected: EXPECTED.to_string() });
-        log_lwt_cross_check(&check); // the WARN path
     }
 
     // ---- the shipped config: schema-valid + derives the expected state topic ----
@@ -455,18 +407,19 @@ mod tests {
         use edgecommons::config::model::Config;
         use edgecommons::uns::{Uns, UnsClass};
 
+        const EXPECTED: &str = "ecv1/gw-01/uns-bridge/main/state";
+
         let raw: serde_json::Value =
             serde_json::from_str(include_str!("../test-configs/config.json")).unwrap();
         // Pins that `-c FILE test-configs/config.json` passes the runtime's
         // canonical-schema validation (EdgeCommonsBuilder::build validates).
         edgecommons::config::validation::validate(&raw).expect("canonical schema must accept");
 
-        // And that the runtime identity derives EXACTLY the D-B11 state topic the
-        // shipped lwt.topic pins (gg.uns().topic(State) — what main cross-checks).
+        // And that the runtime identity derives the D-B11 state topic used by
+        // main to build the private site Last-Will for the console contract.
         let cfg = Config::from_value(crate::COMPONENT_NAME, "gw-01", raw).unwrap();
         let uns = Uns::new(cfg.identity().clone(), cfg.topic_include_root());
         let expected = uns.topic(UnsClass::State).unwrap();
         assert_eq!(expected, EXPECTED);
-        assert_eq!(check_lwt_topic(Some(EXPECTED), &expected), LwtCrossCheck::Match);
     }
 }

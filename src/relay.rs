@@ -130,10 +130,17 @@ impl RelayEngine {
     /// # Errors
     /// [`edgecommons::EdgeCommonsError::UnsValidation`] / `Messaging` when `device` is empty
     /// or violates the UNS token rule.
-    pub fn new(device: impl Into<String>, max_hops: usize, app_enabled: bool) -> Result<RelayEngine> {
+    pub fn new(
+        device: impl Into<String>,
+        max_hops: usize,
+        app_enabled: bool,
+    ) -> Result<RelayEngine> {
         let device = device.into();
         let identity = MessageIdentity::new(
-            vec![HierEntry { level: "device".to_string(), value: device.clone() }],
+            vec![HierEntry {
+                level: "device".to_string(),
+                value: device.clone(),
+            }],
             COMPONENT_TOKEN,
             None,
         )?;
@@ -156,7 +163,10 @@ impl RelayEngine {
         // library like every other topic: `_bcast` is a valid (reserved-token)
         // component position, `cmd` is an open class.
         let bcast = MessageIdentity::new(
-            vec![HierEntry { level: "device".to_string(), value: device.clone() }],
+            vec![HierEntry {
+                level: "device".to_string(),
+                value: device.clone(),
+            }],
             "_bcast",
             None,
         )?;
@@ -223,8 +233,8 @@ impl RelayEngine {
         };
         match direction {
             Direction::Uplink => {
-                let relayed = UPLINK_CLASSES.contains(&class)
-                    || (self.app_enabled && class == UnsClass::App);
+                let relayed =
+                    UPLINK_CLASSES.contains(&class) || (self.app_enabled && class == UnsClass::App);
                 if !relayed {
                     return RelayDecision::Drop(DropReason::ClassNotRelayed);
                 }
@@ -295,7 +305,10 @@ impl RelayEngine {
             }
             None => Vec::new(),
         };
-        if hops.iter().any(|h| h.as_str() == Some(self.hop_id.as_str())) {
+        if hops
+            .iter()
+            .any(|h| h.as_str() == Some(self.hop_id.as_str()))
+        {
             return Err(DropReason::OwnEcho);
         }
         if hops.len() >= self.max_hops {
@@ -343,8 +356,11 @@ mod tests {
     #[test]
     fn uplink_filters_are_the_six_class_wildcards() {
         let e = engine();
-        let filters: Vec<&str> =
-            e.uplink_subscriptions().iter().map(|(_, f)| f.as_str()).collect();
+        let filters: Vec<&str> = e
+            .uplink_subscriptions()
+            .iter()
+            .map(|(_, f)| f.as_str())
+            .collect();
         assert_eq!(
             filters,
             vec![
@@ -361,8 +377,11 @@ mod tests {
     #[test]
     fn app_opt_in_adds_the_seventh_filter() {
         let e = RelayEngine::new(DEVICE, DEFAULT_MAX_HOPS, true).unwrap();
-        let filters: Vec<&str> =
-            e.uplink_subscriptions().iter().map(|(_, f)| f.as_str()).collect();
+        let filters: Vec<&str> = e
+            .uplink_subscriptions()
+            .iter()
+            .map(|(_, f)| f.as_str())
+            .collect();
         assert_eq!(filters.len(), 7);
         assert_eq!(filters[6], "ecv1/+/+/+/app/#");
     }
@@ -412,7 +431,10 @@ mod tests {
             "ecv1/gw-01/opcua-adapter/main/log/tail",
         ] {
             assert!(
-                matches!(e.decide(Direction::Uplink, topic, &envelope(&[])), RelayDecision::Forward(_)),
+                matches!(
+                    e.decide(Direction::Uplink, topic, &envelope(&[])),
+                    RelayDecision::Forward(_)
+                ),
                 "expected uplink forward for {topic}"
             );
         }
@@ -437,27 +459,46 @@ mod tests {
             RelayDecision::Drop(DropReason::ClassNotRelayed)
         );
         let e = RelayEngine::new(DEVICE, DEFAULT_MAX_HOPS, true).unwrap();
-        assert!(matches!(e.decide(Direction::Uplink, topic, &envelope(&[])), RelayDecision::Forward(_)));
+        assert!(matches!(
+            e.decide(Direction::Uplink, topic, &envelope(&[])),
+            RelayDecision::Forward(_)
+        ));
     }
 
     #[test]
     fn downlink_relays_only_own_device_cmd() {
         let e = engine();
         assert!(matches!(
-            e.decide(Direction::Downlink, "ecv1/gw-01/opcua-adapter/main/cmd/reload-config", &envelope(&[])),
+            e.decide(
+                Direction::Downlink,
+                "ecv1/gw-01/opcua-adapter/main/cmd/reload-config",
+                &envelope(&[])
+            ),
             RelayDecision::Forward(_)
         ));
         // Broadcast rides the `+` component position of the pinned filter.
         assert!(matches!(
-            e.decide(Direction::Downlink, "ecv1/gw-01/_bcast/main/cmd/republish-state", &envelope(&[])),
+            e.decide(
+                Direction::Downlink,
+                "ecv1/gw-01/_bcast/main/cmd/republish-state",
+                &envelope(&[])
+            ),
             RelayDecision::Forward(_)
         ));
         assert_eq!(
-            e.decide(Direction::Downlink, "ecv1/gw-02/opcua-adapter/main/cmd/reload-config", &envelope(&[])),
+            e.decide(
+                Direction::Downlink,
+                "ecv1/gw-02/opcua-adapter/main/cmd/reload-config",
+                &envelope(&[])
+            ),
             RelayDecision::Drop(DropReason::NotOwnDevice)
         );
         assert_eq!(
-            e.decide(Direction::Downlink, "ecv1/gw-01/opcua-adapter/main/state", &envelope(&[])),
+            e.decide(
+                Direction::Downlink,
+                "ecv1/gw-01/opcua-adapter/main/state",
+                &envelope(&[])
+            ),
             RelayDecision::Drop(DropReason::ClassNotRelayed)
         );
     }
@@ -466,10 +507,10 @@ mod tests {
     fn non_uns_topics_are_dropped() {
         let e = engine();
         for topic in [
-            "telemetry/gw-01/alarms",             // not ecv1
-            "ecv1/gw-01/comp/main",               // too short (no class position)
-            "ecv1/gw-01/comp/main/notaclass/x",   // unknown class token
-            "edgecommons/reply-abc123",             // reply topics never match (non-ecv1)
+            "telemetry/gw-01/alarms",           // not ecv1
+            "ecv1/gw-01/comp/main",             // too short (no class position)
+            "ecv1/gw-01/comp/main/notaclass/x", // unknown class token
+            "edgecommons/reply-abc123",         // reply topics never match (non-ecv1)
         ] {
             assert_eq!(
                 e.decide(Direction::Uplink, topic, &envelope(&[])),
@@ -484,18 +525,26 @@ mod tests {
     #[test]
     fn first_hop_appends_own_id_creating_the_tag() {
         let d = engine().decide(Direction::Uplink, "ecv1/gw-01/c/main/state", &envelope(&[]));
-        let RelayDecision::Forward(bytes) = d else { panic!("expected forward") };
+        let RelayDecision::Forward(bytes) = d else {
+            panic!("expected forward")
+        };
         assert_eq!(forwarded_hops(&bytes), vec![HOP.to_string()]);
     }
 
     #[test]
     fn hop_tag_is_created_even_when_envelope_has_no_tags_member() {
         // MessageBuilder without .tag() emits no `tags` member at all.
-        let bytes = MessageBuilder::new("state", "1.0").payload(json!({})).build().to_vec().unwrap();
+        let bytes = MessageBuilder::new("state", "1.0")
+            .payload(json!({}))
+            .build()
+            .to_vec()
+            .unwrap();
         let input: Value = serde_json::from_slice(&bytes).unwrap();
         assert!(input.get("tags").is_none(), "precondition: no tags member");
         let d = engine().decide(Direction::Uplink, "ecv1/gw-01/c/main/state", &bytes);
-        let RelayDecision::Forward(out) = d else { panic!("expected forward") };
+        let RelayDecision::Forward(out) = d else {
+            panic!("expected forward")
+        };
         assert_eq!(forwarded_hops(&out), vec![HOP.to_string()]);
     }
 
@@ -506,8 +555,13 @@ mod tests {
             "ecv1/gw-01/c/main/state",
             &envelope(&["gw-99/uns-bridge"]),
         );
-        let RelayDecision::Forward(bytes) = d else { panic!("expected forward") };
-        assert_eq!(forwarded_hops(&bytes), vec!["gw-99/uns-bridge".to_string(), HOP.to_string()]);
+        let RelayDecision::Forward(bytes) = d else {
+            panic!("expected forward")
+        };
+        assert_eq!(
+            forwarded_hops(&bytes),
+            vec!["gw-99/uns-bridge".to_string(), HOP.to_string()]
+        );
     }
 
     #[test]
@@ -530,13 +584,20 @@ mod tests {
             "ecv1/gw-01/c/main/state",
             &envelope(&["a/uns-bridge", "b/uns-bridge", "c/uns-bridge"]),
         );
-        let RelayDecision::Forward(bytes) = d else { panic!("expected forward at 3 hops") };
+        let RelayDecision::Forward(bytes) = d else {
+            panic!("expected forward at 3 hops")
+        };
         assert_eq!(forwarded_hops(&bytes).len(), 4);
         // 4 foreign hops (== maxHops): drop (rule 2 — distinct-bridge cycle defense).
         let d = e.decide(
             Direction::Uplink,
             "ecv1/gw-01/c/main/state",
-            &envelope(&["a/uns-bridge", "b/uns-bridge", "c/uns-bridge", "d/uns-bridge"]),
+            &envelope(&[
+                "a/uns-bridge",
+                "b/uns-bridge",
+                "c/uns-bridge",
+                "d/uns-bridge",
+            ]),
         );
         assert_eq!(d, RelayDecision::Drop(DropReason::MaxHopsExceeded));
     }
@@ -549,7 +610,11 @@ mod tests {
             RelayDecision::Forward(_)
         ));
         assert_eq!(
-            e.decide(Direction::Uplink, "ecv1/gw-01/c/main/state", &envelope(&["x/uns-bridge"])),
+            e.decide(
+                Direction::Uplink,
+                "ecv1/gw-01/c/main/state",
+                &envelope(&["x/uns-bridge"])
+            ),
             RelayDecision::Drop(DropReason::MaxHopsExceeded)
         );
     }
@@ -563,7 +628,9 @@ mod tests {
             .to_vec()
             .unwrap();
         let d = engine().decide(Direction::Uplink, "ecv1/gw-01/c/main/state", &bytes);
-        let RelayDecision::Forward(out) = d else { panic!("expected forward") };
+        let RelayDecision::Forward(out) = d else {
+            panic!("expected forward")
+        };
         assert_eq!(forwarded_hops(&out), vec![HOP.to_string()]);
     }
 
@@ -614,7 +681,9 @@ mod tests {
             "ecv1/gw-01/opcua-adapter/main/cmd/ping",
             &envelope(&[]),
         );
-        let RelayDecision::Forward(bytes) = d else { panic!("expected forward") };
+        let RelayDecision::Forward(bytes) = d else {
+            panic!("expected forward")
+        };
         assert_eq!(forwarded_hops(&bytes), vec![HOP.to_string()]);
     }
 
@@ -624,7 +693,10 @@ mod tests {
         // to stamp and must pass through untouched.
         let mut msg = Message::raw(json!({ "v": 1 }));
         engine().stamp_hop(&mut msg).unwrap();
-        assert!(msg.tags.is_none(), "a raw message must not grow a tags member");
+        assert!(
+            msg.tags.is_none(),
+            "a raw message must not grow a tags member"
+        );
     }
 
     #[test]

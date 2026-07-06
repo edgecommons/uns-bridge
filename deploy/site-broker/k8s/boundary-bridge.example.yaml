@@ -46,7 +46,6 @@ data:
                 "caPath": "/etc/uns-bridge/site-tls/ca.crt"
               }
             },
-            "lwt": { "topic": "ecv1/{ThingName}/uns-bridge/main/state", "payload": { "status": "UNREACHABLE" }, "qos": 1 },
             "uplink": { "classes": { "app": { "enabled": false } } },
             "reply": { "ttlSecs": 60, "maxPending": 1024 },
             "maxHops": 4,

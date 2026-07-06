@@ -127,5 +127,5 @@ as a live-deploy step" notes). What *was* checked:
   `{username, {re, "..."}}` who-specs) was checked against EMQX 5's documented file-ACL grammar.
 - `test-configs/config.json` was re-read against these recipes: its `siteBroker.port` (`1884`,
   plaintext) matches this directory's dev-default `SITE_MQTT_PORT`, and its lack of a
-  `credentials`/`lwt`/mTLS block is consistent with "plaintext dev smoke, not the ACL-enforcing
-  path" above — no changes needed there.
+  `credentials`/mTLS block is consistent with "plaintext dev smoke, not the ACL-enforcing path"
+  above. The site LWT is derived by the bridge, so it is not part of this config.

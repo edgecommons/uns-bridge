@@ -24,7 +24,7 @@ that) the sole entry that declares a `siteBroker`. Two `siteBroker` entries and 
 startup error.
 
 The bridge's **own** UNS identity comes from `hierarchy`/`identity` + `-t/--thing`, and it determines the real
-`state` topic the LWT must match:
+`state` topic used for its heartbeat and for the bridge's private site Last-Will:
 
 ```jsonc
 "hierarchy": { "levels": ["site", "device"] },
@@ -32,8 +32,9 @@ The bridge's **own** UNS identity comes from `hierarchy`/`identity` + `-t/--thin
 // with  --thing gw-01   →   state topic = ecv1/gw-01/uns-bridge/main/state
 ```
 
-Set `instances[site].lwt.topic` to exactly that. A mismatch only WARNs (advisory), but a WARN means your
-UNREACHABLE will land where nobody listens.
+Do not configure an `lwt` block. The bridge derives the site Last-Will from that state topic and registers
+`{"status":"UNREACHABLE"}` with QoS 1 on the site broker. A configured
+`component.instances[site].lwt` is rejected at startup because it is a private bridge-console contract.
 
 ---
 
@@ -71,8 +72,7 @@ uns-bridge --config ./config.json --thing gw-01
     "instances": [
       {
         "id": "site",
-        "siteBroker": { "host": "localhost", "port": 1884, "clientId": "uns-bridge-site" },
-        "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state", "payload": { "status": "UNREACHABLE" }, "qos": 1 }
+        "siteBroker": { "host": "localhost", "port": 1884, "clientId": "uns-bridge-site" }
       }
     ]
   }
@@ -90,7 +90,7 @@ uns-bridge --config ./config.json --thing gw-01
 | `heartbeat` | The bridge's own `state` keepalive on `ecv1/gw-01/uns-bridge/main/state` every 5 s — which matches the uplink `state` filter and rides the relay to the site. |
 | `metricEmission.target: messaging` | Publishes the 30 s relay counters on the UNS `metric` class, so they too ride the relay. |
 | `component.instances[site].siteBroker` | The **site** broker — the bridge's external system. Every uplinked message is republished here topic-verbatim. |
-| `lwt` | Registers a Last-Will on the site connection: if the bridge dies abruptly, the site broker publishes `{status:UNREACHABLE}` on the bridge's state topic. |
+| Derived site LWT | The bridge registers `{"status":"UNREACHABLE"}` on its own `state` topic on the site connection. This is not configurable. |
 
 With no `uplink`/`reply`/`maxHops`/`queue` given, the defaults apply: all six consumer classes relayed (`app`
 off, `log` on by code default), no rate caps, the `evt` buffer on at 1000, `reply.ttlSecs 60` /
@@ -127,7 +127,6 @@ kept off the WAN, the `evt` buffer enlarged, and the reply TTL raised in step wi
           "host": "site-broker.dallas.example", "port": 8883, "clientId": "uns-bridge-gw-01",
           "credentials": { "certPath": "/certs/client.pem", "keyPath": "/certs/client.key", "caPath": "/certs/ca.pem" }
         },
-        "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state", "payload": { "status": "UNREACHABLE" }, "qos": 1 },
 
         "uplink": { "classes": {
           "state":  { "enabled": true },
@@ -149,9 +148,9 @@ kept off the WAN, the `evt` buffer enlarged, and the reply TTL raised in step wi
 ```
 
 Note the device token here is `gw-01` even though `hierarchy` has four levels — the **last** level is always
-the resolved thing name (`--thing gw-01`); `site`/`area`/`line` come from `identity`. So the LWT topic is still
-`ecv1/gw-01/uns-bridge/main/state` (rootless grammar — the enterprise path rides the envelope `identity`, not
-the topic).
+the resolved thing name (`--thing gw-01`); `site`/`area`/`line` come from `identity`. So the bridge's state
+topic, and therefore the private site LWT topic, is still `ecv1/gw-01/uns-bridge/main/state` (rootless
+grammar — the enterprise path rides the envelope `identity`, not the topic).
 
 ### How this config behaves
 
@@ -376,11 +375,10 @@ component:
           certPath: "/greengrass/v2/work/{ComponentFullName}/certs/client.pem"
           keyPath:  "/greengrass/v2/work/{ComponentFullName}/certs/client.key"
           caPath:   "/greengrass/v2/work/{ComponentFullName}/certs/ca.pem"
-      lwt: { topic: "ecv1/{ThingName}/uns-bridge/main/state", payload: { status: "UNREACHABLE" }, qos: 1 }
 ```
 
-> The bridge's own config layer template-resolves only the site **`lwt.topic`**; the `siteBroker`/`credentials`
-> templates above are resolved by the recipe's Greengrass-side substitution.
+> The `siteBroker`/`credentials` templates above are resolved by the recipe's Greengrass-side substitution.
+> The site LWT remains derived by the bridge after the runtime resolves its thing name.
 
 The **site broker** also has its own Greengrass deployment (running the broker via
 `aws.greengrass.DockerApplicationManager`) — see `deploy/site-broker/greengrass/`. That runs the broker the
