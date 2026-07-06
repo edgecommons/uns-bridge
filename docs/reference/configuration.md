@@ -54,7 +54,7 @@ named `"site"` is an error (ambiguous); no site entry at all is an error.
 | Key | Type | Default | Definition |
 |-----|------|---------|-----------|
 | `id` | string | **required** | Instance id; `"site"` selects this entry explicitly. |
-| `siteBroker` | object | **required** | The site broker endpoint — the library `mqttBroker` shape (below). Maps onto the reused provider's `local` slot; there is deliberately no `iotCore` on the site link. |
+| `siteBroker` | object | **required** | The site broker endpoint — the library `mqttBroker` shape (below). Maps onto the reused provider's `local` slot; there is deliberately no `northbound` broker on the site link. |
 | `uplink` | object | see §uplink | Per-class uplink policy: enables, rate caps, and the `evt` replay buffer. |
 | `reply` | object | see §reply | The reply correlation-map knobs. |
 | `maxHops` | number | `4` | Hop-tag cap (loop protection). |

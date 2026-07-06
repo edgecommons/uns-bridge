@@ -95,7 +95,7 @@ impl InstanceEntry {
     /// Build the site connection's [`MessagingConfig`] from this entry — the exact
     /// input the reused core `MqttProvider::connect` takes (§1.1). The site broker
     /// maps onto the config's `local` slot (the provider's primary connection);
-    /// there is deliberately no `iotCore` on the site link.
+    /// there is deliberately no `northbound` broker on the site link.
     ///
     /// # Errors
     /// When the entry has no `siteBroker`.
