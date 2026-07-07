@@ -72,7 +72,7 @@ The library `mqttBroker` shape (identical to any edgecommons broker config).
 | `credentials` | object | mTLS: `{ certPath, keyPath, caPath }`. Omit for a plaintext/anonymous broker (dev only). |
 
 The site Last-Will is not a configuration object. The bridge derives it from its own resolved state topic and
-registers `{"status":"UNREACHABLE"}` with QoS 1 on the site broker. A configured
+registers a protobuf EdgeCommons `state` envelope with `status:"UNREACHABLE"` and QoS 1 on the site broker. A configured
 `component.instances[site].lwt` is rejected at startup because a typo here would break the console
 reachability contract.
 

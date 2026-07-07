@@ -18,15 +18,16 @@
 //! | Connection | Owner | Purpose |
 //! |---|---|---|
 //! | device bus (observability) | the `EdgeCommons` runtime | heartbeat `state`, `cfg` announce, `metric` emission |
-//! | device bus (relay, client id `…-relay`) | the bridge | the raw byte relay (§1.3) + the reply proxy + the rehydration broadcast |
+//! | device bus (relay, client id `…-relay`) | the bridge | the provider-level protobuf relay (§1.3) + the reply proxy + the rehydration broadcast |
 //! | site broker | the bridge | the uplink/downlink relay target; carries the D-B11 LWT |
 //!
 //! `EdgeCommons` deliberately does **not** expose its raw `MessagingProvider`
 //! (`DefaultMessagingService` keeps it private), and the relay must stay at the
-//! raw provider level — byte-verbatim, no reserved-class guard (§1.3) — so the
-//! relay cannot reuse the runtime's connection **without a edgecommons change,
-//! which this slice deliberately does not make**. Follow-up (Rust-only library
-//! affordance): expose the runtime's raw provider (e.g.
+//! raw provider level — below the reserved-class guard (§1.3) — so the relay
+//! cannot reuse the runtime's connection **without a edgecommons change, which
+//! this slice deliberately does not make**. Normal relay payloads remain
+//! protobuf `EdgeCommonsMessage` bytes. Follow-up (Rust-only library affordance):
+//! expose the runtime's raw provider (e.g.
 //! `DefaultMessagingService::provider()`), letting the relay share the runtime's
 //! device-bus connection — one client less, which matters under the GREENGRASS
 //! shared-connection quota once the IPC-primary variant lands.
@@ -67,9 +68,10 @@ use std::time::Duration;
 use anyhow::Context;
 use edgecommons::messaging::config::MessagingConfig;
 use edgecommons::messaging::provider::mqtt::{MqttLastWill, MqttProvider};
-use edgecommons::messaging::{MessagingProvider, Qos};
+use edgecommons::messaging::{MessageBuilder, MessagingProvider, Qos};
 use edgecommons::uns::UnsClass;
 use edgecommons::EdgeCommonsBuilder;
+use serde_json::json;
 
 use crate::config::BridgeConfig;
 use crate::relay::RelayEngine;
@@ -86,7 +88,6 @@ const COMPONENT_NAME: &str = "com.mbreissi.edgecommons.UnsBridge";
 
 /// Delay between site-broker connect attempts (§1.4 — bridge-owned retry loop).
 const SITE_RETRY_DELAY: Duration = Duration::from_secs(5);
-const SITE_UNREACHABLE_LWT_PAYLOAD: &[u8] = br#"{"status":"UNREACHABLE"}"#;
 
 /// Minimal bridge arguments. The standard edgecommons CLI contract is synthesized
 /// from these for the runtime build (full contract = a documented follow-up).
@@ -155,10 +156,10 @@ async fn connect_site_with_retry(
     }
 }
 
-fn site_unreachable_last_will(topic: String) -> MqttLastWill {
+fn site_unreachable_last_will(topic: String, payload: Vec<u8>) -> MqttLastWill {
     MqttLastWill {
         topic,
-        payload: SITE_UNREACHABLE_LWT_PAYLOAD.to_vec(),
+        payload,
         qos: Qos::AtLeastOnce,
     }
 }
@@ -211,11 +212,11 @@ async fn main() -> anyhow::Result<()> {
         "uns-bridge starting"
     );
 
-    // RELAY PRIMARY: the bridge's second, raw device-bus connection (client id
-    // suffixed `-relay` so it never collides with the runtime's). The relay runs
-    // at the raw provider level by design (§1.3 — byte relay, no reserved-class
-    // guard in the path); see the module docs for why it cannot share the
-    // runtime's connection without a (deliberately unmade) edgecommons change.
+    // RELAY PRIMARY: the bridge's second, provider-level device-bus connection
+    // (client id suffixed `-relay` so it never collides with the runtime's). The
+    // relay runs below the MessagingService guard by design (§1.3); see the
+    // module docs for why it cannot share the runtime's connection without a
+    // (deliberately unmade) edgecommons change.
     let primary: Arc<dyn MessagingProvider> = Arc::new(
         MqttProvider::connect(&cfg.relay_primary_messaging())
             .await
@@ -230,7 +231,14 @@ async fn main() -> anyhow::Result<()> {
         .uns()
         .topic(UnsClass::State)
         .context("deriving the private site LWT topic from the bridge state topic")?;
-    let site_last_will = site_unreachable_last_will(site_lwt_topic.clone());
+    let runtime_config = gg.config();
+    let site_lwt_payload = MessageBuilder::new("state", "1.0")
+        .from_config(runtime_config.as_ref())
+        .state_update(json!({ "status": "UNREACHABLE" }))
+        .build()
+        .to_vec()
+        .context("building protobuf site Last-Will state payload")?;
+    let site_last_will = site_unreachable_last_will(site_lwt_topic.clone(), site_lwt_payload);
     tracing::info!(
         topic = %site_lwt_topic,
         "site Last-Will derived from bridge state topic for console reachability"

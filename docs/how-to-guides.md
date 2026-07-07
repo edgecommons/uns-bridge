@@ -52,8 +52,9 @@ deploy **as a pair**.
 ## Understand the automatic site Last-Will
 
 An abrupt device/bridge death is invisible unless the broker announces it. The bridge automatically registers
-a Last-Will on the site connection that publishes `{"status":"UNREACHABLE"}` on the bridge's **own state
-topic**, so a site console watching `ecv1/+/+/+/state` sees the device go dark immediately.
+a Last-Will on the site connection that publishes a protobuf EdgeCommons `state` envelope with
+`status:"UNREACHABLE"` on the bridge's **own state topic**, so a site console watching
+`ecv1/+/+/+/state` sees the device go dark immediately.
 
 The topic is derived from the resolved runtime identity: `ecv1/{device}/uns-bridge/main/state`. Do not add an
 `lwt` object under `component.instances[site]`; the bridge rejects it because this is a private bridge-console
@@ -205,10 +206,11 @@ bash tests/e2e/run.sh
 ```
 
 It boots a throwaway two-EMQX rig on dedicated ports, runs the real bridge binary against the bundled sample
-config, and asserts (with per-assertion PASS/FAIL): uplink of a `state` envelope, an `evt` envelope, and a
-**raw** `data` payload arrive topic-verbatim (envelopes hop-tagged, raw byte-verbatim); downlink of an
-own-device `cmd`; the drop of a foreign-device `cmd`; a reply round-trip; the loop-drop of an own-echo; and
-the bridge's own heartbeat `state` + relay-counter `metric`s appearing and riding the relay. The test is
+config, and asserts (with per-assertion PASS/FAIL): uplink of `state`, `evt`, and `data` protobuf messages
+arrive topic-verbatim with hop tags, including a `data` message whose opaque body bytes are preserved;
+downlink of an own-device `cmd`; the drop of a foreign-device `cmd`; a reply round-trip; the loop-drop of an
+own-echo; and the bridge's own heartbeat `state` + relay-counter `metric`s appearing and riding the relay. The
+test is
 `#[ignore]`d and gated on `UNS_BRIDGE_E2E=1`, so a plain `cargo test` never touches it.
 
 ---

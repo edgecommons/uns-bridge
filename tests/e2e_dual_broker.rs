@@ -7,14 +7,14 @@
 //! |---|---|
 //! | A1 | uplink: a `state` **envelope** published on the device bus arrives **topic-verbatim** on the SITE broker, hop tag `tags._relay = ["gw-01/uns-bridge"]` appended |
 //! | A2 | uplink: an `evt` envelope (with channel) — same contract |
-//! | A3 | uplink: a **raw** (non-envelope) `data` payload relays **byte-verbatim** |
+//! | A3 | uplink: an opaque-body `data` envelope preserves its body bytes |
 //! | B  | downlink: a `cmd` for the bridge's own device published on the SITE broker arrives topic-verbatim (hop-tagged) on the DEVICE bus |
 //! | C  | a `cmd` for **another** device on the site broker is NOT relayed (own-device pinning) |
 //! | D  | request/reply crosses the bridge (§2.4): `header.reply_to` is rewritten to a bridge-minted topic on the way down; the reply returns to the ORIGINAL site reply topic, `correlation_id`/body intact, `reply_to` dropped |
 //! | E  | loop protection (§2.3): an envelope already carrying the bridge's own hop id is dropped, never re-relayed |
 //! | F1 | the bridge's own heartbeat `state` keepalive appears on the DEVICE bus (§2.8 / P3-4b) |
 //! | F2 | the bridge's relay `metric`s appear on the DEVICE bus (first 30 s emission tick) |
-//! | G  | forced bridge death publishes the derived site LWT `{"status":"UNREACHABLE"}` on the bridge's own state topic |
+//! | G  | forced bridge death publishes the derived site LWT protobuf `state` envelope with `status:"UNREACHABLE"` on the bridge's own state topic |
 //!
 //! **Gated twice**: `#[ignore]` so a plain `cargo test` never touches it, plus
 //! the `UNS_BRIDGE_E2E=1` env var so even `--include-ignored` sweeps skip it
@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use edgecommons::messaging::config::MessagingConfig;
+use edgecommons::messaging::message::{Message, MessageBodyCase};
 use edgecommons::messaging::provider::mqtt::MqttProvider;
 use edgecommons::messaging::{Destination, MessageBuilder, MessagingProvider, Qos};
 use serde_json::{json, Value};
@@ -285,7 +286,26 @@ fn envelope(msg_type: &str, body: Value) -> Vec<u8> {
 }
 
 fn parse(bytes: &[u8]) -> Value {
-    serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    serde_json::to_value(Message::from_slice(bytes).expect("protobuf EdgeCommons envelope"))
+        .expect("diagnostic projection")
+}
+
+fn decode(bytes: &[u8]) -> Message {
+    Message::from_slice(bytes).expect("protobuf EdgeCommons envelope")
+}
+
+fn is_unreachable_lwt(bytes: &[u8]) -> bool {
+    let Ok(msg) = Message::from_slice(bytes) else {
+        return false;
+    };
+    if msg.body_case() != MessageBodyCase::StateUpdate {
+        return false;
+    }
+    let bridge_identity = match msg.identity.as_ref() {
+        Some(identity) => identity.component() == "uns-bridge" && identity.path() == DEVICE,
+        None => false,
+    };
+    bridge_identity && msg.body.get("status") == Some(&json!("UNREACHABLE"))
 }
 
 /// The relayed envelope must carry exactly one hop: this bridge's own id.
@@ -464,25 +484,33 @@ async fn dual_emqx_bridge_level_relay() {
     );
 
     let a3_topic = format!("ecv1/{DEVICE}/e2e-comp/main/data/temp");
-    let a3_raw = serde_json::to_vec(&json!({ "temperature": 21.5, "marker": "e2e-A3" }))
-        .expect("A3 payload");
-    dev.publish(
-        &a3_topic,
-        a3_raw.clone(),
-        Destination::Local,
-        Qos::AtLeastOnce,
-    )
-    .await
-    .expect("A3 publish");
+    let a3_opaque = vec![0x00, 0x01, 0x02, 0xfe, 0xff];
+    let a3_payload = MessageBuilder::new("frame-preview", "1.0")
+        .opaque_body(&a3_opaque, "application/octet-stream")
+        .expect("A3 opaque body")
+        .build()
+        .to_vec()
+        .expect("A3 envelope");
+    dev.publish(&a3_topic, a3_payload, Destination::Local, Qos::AtLeastOnce)
+        .await
+        .expect("A3 publish");
     checks.record(
-        "A3 uplink raw data — byte-verbatim",
+        "A3 uplink opaque data — body bytes preserved",
         match site_all.await_topic(&a3_topic, wait).await {
             None => Err("never arrived on the site broker".into()),
-            Some(bytes) if bytes == a3_raw => Ok(()),
-            Some(bytes) => Err(format!(
-                "raw payload not byte-verbatim: {}",
-                String::from_utf8_lossy(&bytes)
-            )),
+            Some(bytes) => {
+                let msg = decode(&bytes);
+                if msg.body_case() != MessageBodyCase::Opaque {
+                    Err(format!("body case is not opaque: {:?}", msg.body_case()))
+                } else {
+                    match msg.opaque_body() {
+                        Ok(Some(body)) if body == a3_opaque => assert_own_hop(&parse(&bytes)),
+                        Ok(Some(_)) => Err("opaque bytes were not preserved".into()),
+                        Ok(None) => Err("opaque body was absent".into()),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+            }
         },
     );
 
@@ -714,7 +742,7 @@ async fn dual_emqx_bridge_level_relay() {
             .await_topic_match_after(
                 &own_state_topic,
                 lwt_seen_before_kill,
-                |bytes| parse(bytes) == json!({ "status": "UNREACHABLE" }),
+                is_unreachable_lwt,
                 Duration::from_secs(15),
             )
             .await

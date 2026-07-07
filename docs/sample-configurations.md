@@ -33,7 +33,7 @@ The bridge's **own** UNS identity comes from `hierarchy`/`identity` + `-t/--thin
 ```
 
 Do not configure an `lwt` block. The bridge derives the site Last-Will from that state topic and registers
-`{"status":"UNREACHABLE"}` with QoS 1 on the site broker. A configured
+a protobuf EdgeCommons `state` envelope with `status:"UNREACHABLE"` and QoS 1 on the site broker. A configured
 `component.instances[site].lwt` is rejected at startup because it is a private bridge-console contract.
 
 ---
@@ -84,13 +84,13 @@ uns-bridge --config ./config.json --thing gw-01
 | Option | Effect |
 |--------|--------|
 | `hierarchy` / `identity` | Place the bridge in the UNS tree. With `--thing gw-01` the device token is `gw-01`; the bridge's own topics are `ecv1/gw-01/uns-bridge/main/...`. |
-| `messaging.local.host/port` | The **device** broker. The runtime connects here for the bridge's own state/cfg/metric; the relay opens a **second** client here (id `uns-bridge-local-relay`) for the raw byte relay. |
+| `messaging.local.host/port` | The **device** broker. The runtime connects here for the bridge's own state/cfg/metric; the relay opens a **second** client here (id `uns-bridge-local-relay`) for the provider-level protobuf relay. |
 | `messaging.local.clientId` | The runtime's device-bus client id. The relay derives `<clientId>-relay` so the two never collide (a shared id makes the broker bounce them in a session-takeover loop). |
 | `messaging.requestTimeoutSeconds` | The framework request deadline. Paired with `reply.ttlSecs` (defaulted here to 60 = 2×30). |
 | `heartbeat` | The bridge's own `state` keepalive on `ecv1/gw-01/uns-bridge/main/state` every 5 s — which matches the uplink `state` filter and rides the relay to the site. |
 | `metricEmission.target: messaging` | Publishes the 30 s relay counters on the UNS `metric` class, so they too ride the relay. |
 | `component.instances[site].siteBroker` | The **site** broker — the bridge's external system. Every uplinked message is republished here topic-verbatim. |
-| Derived site LWT | The bridge registers `{"status":"UNREACHABLE"}` on its own `state` topic on the site connection. This is not configurable. |
+| Derived site LWT | The bridge registers a protobuf EdgeCommons `state` envelope with `status:"UNREACHABLE"` on its own `state` topic on the site connection. This is not configurable. |
 
 With no `uplink`/`reply`/`maxHops`/`queue` given, the defaults apply: all six consumer classes relayed (`app`
 off, `log` on by code default), no rate caps, the `evt` buffer on at 1000, `reply.ttlSecs 60` /
@@ -204,12 +204,18 @@ A device component publishes on the device bus:
 
 ```
 topic:  ecv1/gw-01/opcua-adapter/kep1/data/Temperature
-body:   { "header": {...}, "identity": {...}, "body": { "value": 21.4, "quality": "GOOD" } }
+body:   protobuf EdgeCommonsMessage bytes
 ```
 
-The bridge matches `ecv1/+/+/+/data/#`, re-checks class=`data` (relayed) — parses the envelope, appends its hop
-id, and (assuming the `data` bucket has a token) republishes **byte-structurally identical except the hop tag**
-to the *same topic* on the site broker:
+If decoded for diagnostics, the message may project as:
+
+```jsonc
+{ "header": { ... }, "identity": { ... }, "body": { "value": 21.4, "quality": "GOOD" } }
+```
+
+The bridge matches `ecv1/+/+/+/data/#`, re-checks class=`data` (relayed), decodes the protobuf envelope,
+appends its hop id, and (assuming the `data` bucket has a token) re-encodes and republishes it to the *same
+topic* on the site broker:
 
 ```
 site topic:  ecv1/gw-01/opcua-adapter/kep1/data/Temperature   (identical)

@@ -17,10 +17,12 @@
 //! - **Downlink** (site broker → device bus) relays `cmd` only, **pinned to this
 //!   bridge's own device token** — a bridge must only pull down commands addressed
 //!   to *its* device (which also matches its site-broker ACL scope).
-//! - **Hop tag** (`tags._relay`, a JSON array of `{device}/uns-bridge` hop ids):
-//!   drop-if-self (own echo), drop when `maxHops` is reached, else append own id.
-//! - **Raw (non-envelope) messages** carry no tags to stamp; they relay verbatim
-//!   and are protected structurally by the uplink∩downlink class disjointness.
+//! - **Hop tag** (`tags._relay`, a protobuf envelope tag whose diagnostic JSON
+//!   projection is an array of `{device}/uns-bridge` hop ids): drop-if-self
+//!   (own echo), drop when `maxHops` is reached, else append own id.
+//! - Normal EdgeCommons messages are protobuf bytes. Foreign or malformed
+//!   payloads are dropped by this engine; opaque application bytes belong inside
+//!   the protobuf envelope's opaque body lane.
 //!
 //! The IO wiring that pumps subscriptions through this engine lives in
 //! [`crate::io`]; the reply-`reply_to` rewrite (P3-3, [`crate::reply`]) slots in
@@ -76,9 +78,8 @@ pub enum Direction {
 /// The engine's verdict for one would-be relay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayDecision {
-    /// Republish these bytes to the same topic on the other connection. For an
-    /// envelope the bytes carry the appended hop tag; for a raw message they are
-    /// the original payload verbatim.
+    /// Republish these protobuf bytes to the same topic on the other connection.
+    /// The bytes carry the appended hop tag, with the selected body lane preserved.
     Forward(Vec<u8>),
     /// Do not relay.
     Drop(DropReason),
@@ -97,7 +98,7 @@ pub enum DropReason {
     ClassNotRelayed,
     /// A downlink `cmd` addressed to a different device than this bridge's own.
     NotOwnDevice,
-    /// Valid JSON that claims to be an envelope but has a malformed `header`/`tags`.
+    /// Bytes that are not a valid EdgeCommons protobuf envelope.
     MalformedEnvelope,
 }
 
@@ -257,18 +258,12 @@ impl RelayEngine {
                 return RelayDecision::Drop(DropReason::MalformedEnvelope);
             }
         };
-        if msg.is_raw() {
-            // Raw messages cannot carry the tag; they are protected structurally by
-            // the uplink/downlink class disjointness. Relay the ORIGINAL bytes
-            // verbatim (never re-serialize a raw as `{"raw": …}`).
-            return RelayDecision::Forward(payload.to_vec());
-        }
         if let Err(reason) = self.stamp_hop(&mut msg) {
             return RelayDecision::Drop(reason);
         }
 
-        // 3. Re-serialize (structurally identical envelope + the appended hop tag,
-        //    D-U22 — serde member order is deterministic).
+        // 3. Re-serialize as protobuf (structurally identical envelope + the
+        //    appended hop tag; the body lane remains protobuf, including opaque bytes).
         match msg.to_vec() {
             Ok(bytes) => RelayDecision::Forward(bytes),
             Err(e) => {
@@ -280,8 +275,9 @@ impl RelayEngine {
 
     /// Apply the §2.3 hop rules to a parsed envelope **in place**: drop-if-self
     /// (rule 1), drop at `maxHops` (rule 2), else append this bridge's own hop id
-    /// (rule 3), creating the `tags`/`_relay` members as needed. A raw message is
-    /// an `Ok` no-op — it cannot carry the tag (protected structurally, §2.3).
+    /// (rule 3), creating the `tags`/`_relay` members as needed. A raw diagnostic
+    /// message is an `Ok` no-op; non-protobuf payloads are not normal EdgeCommons
+    /// wire data.
     ///
     /// Shared by [`Self::decide`] and the reply back-haul
     /// ([`crate::reply::prepare_reply`] — "the reply also gets the hop tag
@@ -323,6 +319,7 @@ impl RelayEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edgecommons::messaging::message::MessageBodyCase;
     use edgecommons::messaging::MessageBuilder;
     use serde_json::json;
 
@@ -342,8 +339,8 @@ mod tests {
     }
 
     fn forwarded_hops(bytes: &[u8]) -> Vec<String> {
-        let v: Value = serde_json::from_slice(bytes).unwrap();
-        v["tags"][RELAY_TAG]
+        let msg = Message::from_slice(bytes).unwrap();
+        msg.tags.unwrap().extra[RELAY_TAG]
             .as_array()
             .unwrap()
             .iter()
@@ -442,7 +439,7 @@ mod tests {
 
     #[test]
     fn uplink_never_relays_cmd() {
-        // The class disjointness IS the structural loop guard for raw messages.
+        // The class disjointness is the structural loop guard for command relays.
         let d = engine().decide(
             Direction::Uplink,
             "ecv1/gw-01/opcua-adapter/main/cmd/ping",
@@ -539,8 +536,8 @@ mod tests {
             .build()
             .to_vec()
             .unwrap();
-        let input: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(input.get("tags").is_none(), "precondition: no tags member");
+        let input = Message::from_slice(&bytes).unwrap();
+        assert!(input.tags.is_none(), "precondition: no tags member");
         let d = engine().decide(Direction::Uplink, "ecv1/gw-01/c/main/state", &bytes);
         let RelayDecision::Forward(out) = d else {
             panic!("expected forward")
@@ -634,10 +631,10 @@ mod tests {
         assert_eq!(forwarded_hops(&out), vec![HOP.to_string()]);
     }
 
-    // ---- envelope fidelity + raw handling ----
+    // ---- envelope fidelity + malformed handling ----
 
     #[test]
-    fn relay_is_verbatim_except_the_hop_tag() {
+    fn relay_preserves_decoded_message_except_the_hop_tag() {
         let bytes = MessageBuilder::new("state", "1.0")
             .payload(json!({ "status": "RUNNING", "nested": { "a": [1, 2, 3] } }))
             .tag("site", json!("dallas"))
@@ -652,26 +649,56 @@ mod tests {
         else {
             panic!("expected forward")
         };
-        let mut input: Value = serde_json::from_slice(&bytes).unwrap();
-        let output: Value = serde_json::from_slice(&out).unwrap();
-        // Structurally identical once the hop tag is added to the input (D-U22).
+        assert!(
+            serde_json::from_slice::<Value>(&out).is_err(),
+            "relayed wire payload must remain protobuf, not JSON"
+        );
+        let mut input = serde_json::to_value(Message::from_slice(&bytes).unwrap()).unwrap();
+        let output = serde_json::to_value(Message::from_slice(&out).unwrap()).unwrap();
+        // Diagnostic projection is identical once the hop tag is added to the input.
         input["tags"][RELAY_TAG] = json!([HOP]);
         assert_eq!(output, input);
     }
 
     #[test]
-    fn raw_json_message_relays_original_bytes_verbatim() {
-        // A non-envelope object (no header/identity/tags/body) is a raw message.
+    fn foreign_json_payload_is_dropped() {
         let payload = serde_json::to_vec(&json!({ "temperature": 21.5 })).unwrap();
         let d = engine().decide(Direction::Uplink, "ecv1/gw-01/c/main/data/temp", &payload);
-        assert_eq!(d, RelayDecision::Forward(payload));
+        assert_eq!(d, RelayDecision::Drop(DropReason::MalformedEnvelope));
     }
 
     #[test]
-    fn raw_non_json_payload_relays_original_bytes_verbatim() {
+    fn foreign_non_json_payload_is_dropped() {
         let payload = b"not json at all".to_vec();
         let d = engine().decide(Direction::Uplink, "ecv1/gw-01/c/main/data/blob", &payload);
-        assert_eq!(d, RelayDecision::Forward(payload));
+        assert_eq!(d, RelayDecision::Drop(DropReason::MalformedEnvelope));
+    }
+
+    #[test]
+    fn opaque_body_bytes_survive_hop_tagging() {
+        let body = [0x00, 0x01, 0xfe, 0xff, 0x42];
+        let bytes = MessageBuilder::new("frame-preview", "1.0")
+            .opaque_payload(body, "application/octet-stream")
+            .unwrap()
+            .tag("site", json!("dallas"))
+            .build()
+            .to_vec()
+            .unwrap();
+        let RelayDecision::Forward(out) =
+            engine().decide(Direction::Uplink, "ecv1/gw-01/cam/main/data/frame", &bytes)
+        else {
+            panic!("expected forward")
+        };
+        let decoded = Message::from_slice(&out).unwrap();
+        assert_eq!(decoded.body_case(), MessageBodyCase::Opaque);
+        assert_eq!(decoded.opaque_body().unwrap().unwrap(), body);
+        assert_eq!(
+            decoded.content_type.as_deref(),
+            Some("application/octet-stream")
+        );
+        let tags = decoded.tags.unwrap().extra;
+        assert_eq!(tags.get("site"), Some(&json!("dallas")));
+        assert_eq!(tags.get(RELAY_TAG), Some(&json!([HOP])));
     }
 
     #[test]
@@ -688,20 +715,20 @@ mod tests {
     }
 
     #[test]
-    fn stamp_hop_is_a_noop_for_raw_messages() {
-        // The reply back-haul calls stamp_hop directly; a raw reply has nothing
-        // to stamp and must pass through untouched.
+    fn stamp_hop_is_a_noop_for_diagnostic_raw_messages() {
+        // Raw Message values can still exist as diagnostic/local values, but they
+        // are not normal EdgeCommons wire data.
         let mut msg = Message::raw(json!({ "v": 1 }));
         engine().stamp_hop(&mut msg).unwrap();
         assert!(
             msg.tags.is_none(),
-            "a raw message must not grow a tags member"
+            "a diagnostic Message value with no header must not grow a tags member"
         );
     }
 
     #[test]
     fn malformed_envelope_is_dropped() {
-        // Valid JSON, claims to be an envelope, but the header is not an object.
+        // JSON text is not a protobuf EdgeCommonsMessage on the wire.
         let payload = serde_json::to_vec(&json!({ "header": 42, "body": {} })).unwrap();
         let d = engine().decide(Direction::Uplink, "ecv1/gw-01/c/main/state", &payload);
         assert_eq!(d, RelayDecision::Drop(DropReason::MalformedEnvelope));

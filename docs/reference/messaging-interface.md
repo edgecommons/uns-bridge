@@ -46,12 +46,12 @@ the relay, which forwards below the guard.
 ## The relay matrix
 
 This is the whole routing contract. **Uplink** subscribes six wildcards on the device bus and republishes each
-match, topic-verbatim, on the site broker; **downlink** subscribes one pinned filter on the site broker and
-republishes on the device bus.
+valid edgecommons protobuf message, topic-verbatim, on the site broker; **downlink** subscribes one pinned
+filter on the site broker and republishes valid protobuf commands on the device bus.
 
 | Direction | Classes relayed | Subscription filter(s) | Republished to |
 |-----------|-----------------|------------------------|----------------|
-| **Uplink** (device → site) | `state`, `cfg`, `evt`, `metric`, `data`, `log` (six consumer classes); `app` opt-in | `ecv1/+/+/+/state` · `ecv1/+/+/+/cfg` · `ecv1/+/+/+/evt/#` · `ecv1/+/+/+/metric/#` · `ecv1/+/+/+/data/#` · `ecv1/+/+/+/log/#` (+ `ecv1/+/+/+/app/#` when `app` enabled) | the **identical topic** on the site broker, hop tag appended (envelope) / byte-verbatim (raw) |
+| **Uplink** (device → site) | `state`, `cfg`, `evt`, `metric`, `data`, `log` (six consumer classes); `app` opt-in | `ecv1/+/+/+/state` · `ecv1/+/+/+/cfg` · `ecv1/+/+/+/evt/#` · `ecv1/+/+/+/metric/#` · `ecv1/+/+/+/data/#` · `ecv1/+/+/+/log/#` (+ `ecv1/+/+/+/app/#` when `app` enabled) | the **identical topic** on the site broker, protobuf envelope decoded, hop tag appended, then re-encoded |
 | **Downlink** (site → device) | `cmd` only, **pinned to this bridge's own device** | `ecv1/{device}/+/+/cmd/#` | the **identical topic** on the device bus, hop tag appended |
 
 Notes:
@@ -60,8 +60,9 @@ Notes:
   `state`/`cfg` filters look different from the rest.
 - The downlink filter's `+` in the component position also matches the reserved **`_bcast`** pseudo-component,
   so `ecv1/{device}/_bcast/main/cmd/republish-*` is relayed like any other own-device `cmd`.
-- **`cmd` is never uplinked** (no cross-device request/reply). The uplink set ∩ downlink set = ∅ — that
-  disjointness is the structural loop guard for raw messages.
+- **`cmd` is never uplinked** (no cross-device request/reply). The uplink set ∩ downlink set = ∅, which
+  prevents a single bridge from matching its own downlink as uplink. Non-protobuf payloads are not a fallback
+  relay path; they are dropped as malformed.
 - Even though the filters already constrain arrivals, the engine **re-checks** class + device on every message
   (defense against a misconfigured broker ACL); a message that fails re-check is dropped and counted
   (`ClassNotRelayed` / `NotOwnDevice` / `NotUnsTopic` → `relay_routed_dropped`).
@@ -94,9 +95,9 @@ A downlink `cmd` carrying `header.reply_to` is proxied through the correlation m
 1. The bridge mints a device-bus reply topic (`edgecommons/reply-<uuid>`), **subscribes it first**, rewrites the
    command's `header.reply_to` to it, records `bridge topic → original site reply_to`, then relays the command
    to the device bus (hop-tagged).
-2. The **first** message on that bridge topic is relayed to the **original** site `reply_to`, verbatim except
-   the hop tag is appended and `header.reply_to` is dropped; the entry is removed and the bridge topic
-   unsubscribed (one-shot).
+2. The **first** protobuf message on that bridge topic is decoded, relayed to the **original** site `reply_to`
+   with the hop tag appended and `header.reply_to` dropped, then re-encoded; the entry is removed and the
+   bridge topic unsubscribed (one-shot).
 3. Entries expire after `reply.ttlSecs` (default 60); the map is bounded by `reply.maxPending` (default 1024,
    evict-oldest). A reply with no live entry is a **stray** (dropped, counted `relay_reply_stray`).
 
@@ -126,7 +127,7 @@ Counters are **interval deltas**; gauges are **current** values. Dimensions come
 | `relay_downlinked` | commands relayed site → device |
 | `relay_loop_dropped` | hop-tag drops (own echo + maxHops) |
 | `relay_routed_dropped` | class-routing / device-pinning / non-UNS-topic drops |
-| `relay_malformed_dropped` | malformed-envelope drops |
+| `relay_malformed_dropped` | payloads that cannot decode as valid edgecommons protobuf envelopes |
 | `relay_publish_failed` | forward decisions whose republish failed at the transport (incl. a downlink cmd not relayed because its reply-topic subscribe failed) |
 | `relay_reply_relayed` | replies relayed device → site through the correlation map |
 | `relay_reply_expired` | correlation entries torn down unresolved (TTL expiry + evict-oldest) |
@@ -146,13 +147,13 @@ Counters are **interval deltas**; gauges are **current** values. Dimensions come
 
 `state`/`metric`/`cfg`/`log` are library-owned **reserved** classes — a *component's* raw publish to them is
 rejected by the messaging service's guard. The bridge is exempt: its relay runs at the raw provider level (no
-guard in the path), which is exactly why it can forward other components' reserved-class traffic byte-verbatim.
+guard in the path), which is exactly why it can forward other components' reserved-class protobuf traffic.
 The durable boundary is instead the **site broker's per-device ACL** — deploy the bridge only against an
 ACL-enforcing site broker.
 
 ## Startup, shutdown, and reconnection behavior
 
-- **Startup order:** edgecommons runtime (device bus, fatal if down) → relay's raw device-bus connection (fatal
+- **Startup order:** edgecommons runtime (device bus, fatal if down) → relay's provider-level device-bus connection (fatal
   if down) → derive the private site LWT topic from the bridge state topic → site connect (retried forever,
   ~5 s between tries; abandonable by a shutdown signal) → subscribe all filters → `relay running`.
 - **Intermittent uplink:** the site connect retries in the bridge's own loop; the provider re-subscribes every

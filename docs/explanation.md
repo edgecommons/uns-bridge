@@ -31,7 +31,7 @@ actually **three**, because the bridge is a proper edgecommons component that al
 flowchart LR
   subgraph device["Device bus (local MQTT / Nucleus IPC)"]
     obs["OBSERVABILITY conn\n(EdgeCommons runtime)"]
-    relayp["RELAY PRIMARY conn\n(raw provider, id …-relay)"]
+    relayp["RELAY PRIMARY conn\n(provider-level, id …-relay)"]
   end
   subgraph site["Site UNS broker"]
     sitec["SITE conn\n(reused MqttProvider + derived LWT)"]
@@ -46,16 +46,19 @@ flowchart LR
 | Connection | Owner | Built from | Purpose |
 |---|---|---|---|
 | **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime | the standard `messaging` section of the config file (which doubles as the `--transport MQTT` payload) | the bridge's own identity, logging init, the heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` announce, `gg.metrics()`, and the library-owned SIGTERM/Ctrl-C shutdown signal |
-| **RELAY PRIMARY** (device bus) | the bridge | the same `messaging` section, with `-relay` appended to every client id | the raw byte relay, the reply proxy's device-side reply topics, and the reconnect rehydration broadcast |
+| **RELAY PRIMARY** (device bus) | the bridge | the same `messaging` section, with `-relay` appended to every client id | the provider-level protobuf relay, the reply proxy's device-side reply topics, and the reconnect rehydration broadcast |
 | **SITE** | the bridge | the bridge's own `component.instances[]` `"site"` entry, by reusing the edgecommons core's public MQTT provider with a bridge-derived Last-Will | the uplink target and downlink source; carries the private Last-Will `UNREACHABLE` contract |
 
 **Why two connections to the *same* device bus?** The relay must operate at the **raw provider level** —
-byte-verbatim, with *no* reserved-class publish guard — because it forwards messages other components
-authored (including publishes to reserved classes like `state`/`metric`). The `EdgeCommons` runtime
-deliberately keeps its raw `MessagingProvider` private (its `MessagingService` always enforces the
-reserved-class guard), so the relay cannot borrow the runtime's connection. The cost is one extra local TCP
-client on the device broker — trivial on HOST — and the two clients must not share an MQTT id (a shared id
-makes the broker evict them in a session-takeover loop), hence the `-relay` suffix.
+below the reserved-class publish guard — because it forwards messages other components authored (including
+publishes to reserved classes like `state`/`metric`). That does not make arbitrary bytes part of the normal
+relay contract: edgecommons UNS messages are protobuf `EdgeCommonsMessage` bytes, and the bridge decodes,
+mutates relay metadata, and re-encodes that envelope. Foreign/non-protobuf payloads on these paths are dropped
+as malformed. The `EdgeCommons` runtime deliberately keeps its raw `MessagingProvider` private (its
+`MessagingService` always enforces the reserved-class guard), so the relay cannot borrow the runtime's
+connection. The cost is one extra local TCP client on the device broker — trivial on HOST — and the two
+clients must not share an MQTT id (a shared id makes the broker evict them in a session-takeover loop), hence
+the `-relay` suffix.
 
 The elegant consequence: because the bridge's own `state`/`cfg`/`metric` traffic goes out on the
 OBSERVABILITY connection and *matches the relay's own uplink filters*, the bridge is relayed to the site
@@ -65,8 +68,9 @@ plus the one thing only the bridge sets: the private site-connection Last-Will.
 ## The relay matrix — what crosses, and which way
 
 The relay is **topic-verbatim**: a forwarded message is republished to the *identical* topic string on the
-other connection; the envelope travels untouched except for the hop tag. What crosses is a fixed matrix of
-UNS classes.
+other connection. The protobuf envelope is decoded and re-encoded only when the bridge appends its hop tag or
+rewrites reply metadata; body content, including opaque body bytes, is not interpreted. What crosses is a fixed
+matrix of UNS classes.
 
 ```mermaid
 flowchart LR
@@ -84,10 +88,9 @@ flowchart LR
   downlink filter is pinned to `ecv1/{device}/+/+/cmd/#`. A bridge must pull down only commands addressed to
   its device, which is also exactly the scope its site-broker ACL grants it.
 
-That the uplink set and the downlink set are **disjoint** is not incidental — it is the *structural* loop
-guard for raw (non-envelope) messages, which carry no hop tag to inspect. A `cmd` the bridge relays down
+That the uplink set and the downlink set are **disjoint** is not incidental. A `cmd` the bridge relays down
 onto the device bus can never match an uplink filter, so a single bridge can never echo a message back to
-where it came from, envelope or not.
+where it came from; the hop tag handles envelope cycles across distinct bridges.
 
 Why re-check the class in the engine when the subscription filters already constrain what arrives? Because
 the decision surface should be self-contained and testable without a broker, and because a misconfigured
@@ -98,20 +101,21 @@ routing/pinning/loop-protection surface is unit-tested exhaustively against fake
 ## Loop protection — the hop tag
 
 The site broker is not a dead end: a message relayed up could, in a multi-site or misconfigured topology,
-find its way back to a device bus and be relayed again. The bridge stamps every relayed **envelope** with a
-reserved tag, `tags._relay` — a JSON array of hop ids, each `{device}/uns-bridge`. Before forwarding, it
-applies three rules:
+find its way back to a device bus and be relayed again. The bridge stamps every relayed protobuf envelope with
+a reserved tag, `tags._relay`. It is normal envelope metadata; diagnostic JSON renders it as an array of hop
+ids, each `{device}/uns-bridge`. Before forwarding, it applies three rules:
 
 1. **Drop-if-self** — if the array already contains this bridge's own hop id, drop silently (own echo).
 2. **Drop at `maxHops`** — if the array already holds `maxHops` ids (default **4**), drop. This is defense
    against a cycle among *distinct* bridges, where drop-if-self never fires on the first lap.
-3. **Otherwise append** this bridge's id and forward, envelope otherwise byte-structurally identical.
+3. **Otherwise append** this bridge's id and forward, envelope otherwise semantically identical.
 
-Two subtleties worth internalizing. First, **raw messages carry no tags** and so cannot be hop-stamped — they
-rely entirely on the class-disjointness structural guard above. Second, the `_` prefix on `_relay` is the
-library's reserved-tag convention; a non-conforming relay that wrote a non-array `_relay` is tolerated by
-normalizing it (the `maxHops` cap still bounds any residual cycle). Consumers ignore `_relay`, but it
-doubles as a "which path did this message take" breadcrumb.
+Two subtleties worth internalizing. First, envelope `tags` are orthogonal metadata: `_relay` is not payload
+content, and opaque application bytes stay in `body`. Second, the `_` prefix on `_relay` is the library's
+reserved-tag convention; a non-conforming relay that wrote a non-list `_relay` is tolerated by normalizing it
+(the `maxHops` cap still bounds any residual cycle). Consumers ignore `_relay`, but it doubles as a "which path
+did this message take" breadcrumb. Payloads that cannot decode as protobuf edgecommons envelopes are dropped as
+malformed, not forwarded without a hop tag.
 
 ## Request/reply across the bridge — the correlation map
 
@@ -127,9 +131,9 @@ The bridge proxies the reply path:
    **subscribes that topic on the device bus first**, then relays the rewritten command, and records
    `bridge topic → original site reply topic` in a TTL'd correlation map. Subscribing before publishing
    closes the race where a fast responder replies before the subscription is live.
-2. **Up** — the first message on a bridge reply topic is relayed to the **original** site `reply_to`,
-   verbatim except for two touches: the hop tag is appended ("a reply is a relay like any other") and
-   `header.reply_to` is dropped (a reply carries none, and a device-bus topic would be meaningless at the
+2. **Up** — the first protobuf message on a bridge reply topic is decoded, relayed to the **original** site
+   `reply_to`, and re-encoded with two touches: the hop tag is appended ("a reply is a relay like any other")
+   and `header.reply_to` is dropped (a reply carries none, and a device-bus topic would be meaningless at the
    site). The correlation entry is then removed and the bridge topic unsubscribed — **one-shot**,
    first-reply-wins.
 3. **TTL & bound** — entries expire after `reply.ttlSecs` (default **60 s**), and the map is bounded by
@@ -185,9 +189,10 @@ current values. See [reference/messaging-interface.md](reference/messaging-inter
 table.
 
 The site Last-Will is deliberately private to the bridge-console contract. At startup the bridge derives its
-real state topic from the resolved runtime identity (`gg.uns().topic(State)`) and registers
-`{"status":"UNREACHABLE"}` on that topic with QoS 1 on the site broker. There is no `lwt` knob to set; a
-configured `component.instances[site].lwt` is rejected so a typo cannot silently break console reachability.
+real state topic from the resolved runtime identity (`gg.uns().topic(State)`) and registers a protobuf
+EdgeCommons `state` envelope with `status:"UNREACHABLE"` on that topic with QoS 1 on the site broker.
+There is no `lwt` knob to set; a configured `component.instances[site].lwt` is rejected so a typo cannot
+silently break console reachability.
 
 ## Platforms: where a bridge runs
 
@@ -208,8 +213,8 @@ configured `component.instances[site].lwt` is rejected so a typo cannot silently
 ## A note on security
 
 The relay runs at the raw provider level with **no in-process publish guard** — by design (it must forward
-other components' reserved-class publishes byte-verbatim). That means the **site broker's per-device ACL is
-the security boundary**, not any code in the bridge: an ACL that lets each bridge publish only under its own
+other components' reserved-class protobuf publishes). That means the **site broker's per-device ACL is the
+security boundary**, not any code in the bridge: an ACL that lets each bridge publish only under its own
 `ecv1/{device}/#` subtree (and read only its own `cmd`) is what actually contains a compromised or
 misconfigured device. Deploy the bridge **only** against an ACL-enforcing (and, in production, mTLS) site
 broker; an ACL-less site broker has no boundary at all. The `deploy/site-broker/` recipe set ships exactly

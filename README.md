@@ -26,22 +26,25 @@ connections:
 | Connection | What | Built from |
 |---|---|---|
 | **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime: identity, the automatic heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` publisher, `gg.metrics()` (`metricEmission.target = "messaging"`), logging init, SIGTERM handling | the standard `messaging` config section — the config file doubles as the `--transport MQTT` payload |
-| **RELAY PRIMARY** (device bus) | the raw byte relay (§1.3) + reply proxy + rehydration broadcast | the same `messaging` section with the client id suffixed **`-relay`** (two MQTT clients must not share an id) |
+| **RELAY PRIMARY** (device bus) | the provider-level protobuf relay (§1.3) + reply proxy + rehydration broadcast | the same `messaging` section with the client id suffixed **`-relay`** (two MQTT clients must not share an id) |
 | **SITE** | the site UNS broker — the bridge's **external system**; carries the private bridge-console D-B11 LWT | the bridge's own `component.instances[]` `"site"` entry for the broker endpoint; the bridge derives the LWT from its canonical state topic and passes it to `MqttProvider::connect_with_last_will` |
 
 Why two device-bus connections: `EdgeCommons` deliberately does **not** expose its raw
 `MessagingProvider` (`DefaultMessagingService` keeps it private), and the relay must stay at the
-raw provider level — byte-verbatim, no reserved-class guard (§1.3) — so sharing the runtime's
-connection would require a edgecommons change this slice deliberately does not make. The cost is one
-extra local TCP client on the device broker (trivial on HOST/EMQX). *Follow-up (Rust-only library
-affordance)*: expose the runtime's raw provider (e.g. `DefaultMessagingService::provider()`) so
-the relay can share it — one client less, which matters under the GREENGRASS shared-connection
-quota once the IPC-primary variant lands.
+provider level — below the reserved-class guard (§1.3) — so sharing the runtime's connection would
+require a edgecommons change this slice deliberately does not make. The payload contract is still the
+standard edgecommons wire contract: normal UNS messages are protobuf `EdgeCommonsMessage` bytes. The
+bridge may decode that envelope to append `_relay` or rewrite `reply_to`, then re-encodes protobuf;
+opaque application bytes survive inside the protobuf body. Foreign/non-protobuf bytes on these relay
+paths are dropped as malformed rather than forwarded. The cost is one extra local TCP client on the
+device broker (trivial on HOST/EMQX). *Follow-up (Rust-only library affordance)*: expose the runtime's
+raw provider (e.g. `DefaultMessagingService::provider()`) so the relay can share it — one client less,
+which matters under the GREENGRASS shared-connection quota once the IPC-primary variant lands.
 
-The relay runs at the **raw `MessagingProvider` level** on both of its connections (byte relay).
-The reserved-class publish guard is a `MessagingService` concern and is deliberately not in this
-path (§1.3) — the site broker's **per-device ACL** is the durable boundary: a bridge may publish
-only under its own `ecv1/{device}/#` subtree.
+The relay runs at the **raw `MessagingProvider` level** on both of its connections, but only to bypass
+the `MessagingService` publish guard. The reserved-class publish guard is a `MessagingService` concern
+and is deliberately not in this path (§1.3) — the site broker's **per-device ACL** is the durable
+boundary: a bridge may publish only under its own `ecv1/{device}/#` subtree.
 
 The site uplink is intermittent by design (edge-first): the bridge comes up and serves the device
 bus while the WAN is down, retrying the site connect in its own loop (§1.4); the provider
@@ -56,23 +59,25 @@ re-subscribes every filter on each CONNACK, so reconnection is transparent.
 
 Explicit non-flows (v1): `cmd` is never uplinked (no cross-device request/reply, D-B7); reply
 topics (`edgecommons/reply-…`, non-`ecv1`) never match a UNS filter and only cross via the §2.4
-correlation map (below). The uplink∩downlink class **disjointness** is also the structural loop
-guard for raw (non-enveloped) messages.
+correlation map (below). The uplink∩downlink class **disjointness** is also a structural guard
+against a single bridge matching its own downlink as uplink.
 
 ### Hop-tag loop protection (§2.3)
 
-Every relayed **envelope** gets the reserved tag `tags._relay` — a JSON array of hop ids
-(`{device}/uns-bridge`) — appended. Before relaying, the bridge:
+Every relayed protobuf `EdgeCommonsMessage` gets the reserved envelope tag `tags._relay` appended.
+The tag is encoded as normal protobuf metadata; JSON renders it as an array of hop ids
+(`{device}/uns-bridge`) only in diagnostic projections after decode. Before relaying, the bridge:
 
 1. drops silently if the array already contains its **own** id (own echo);
 2. drops if the array already carries `maxHops` ids (default **4** — defense against a cycle among
    *distinct* bridges);
-3. otherwise appends its id and relays, envelope otherwise untouched (topic-verbatim, structural
-   identity per D-U22).
+3. otherwise appends its id and relays, message otherwise semantically untouched (topic-verbatim,
+   protobuf re-encoded, opaque body bytes preserved).
 
-Raw messages carry no tags and are protected by the class disjointness. Consumers ignore `_relay`
-(it doubles as the "which path did this message take" breadcrumb). Tag keys starting with `_` are
-library/system-reserved.
+Non-protobuf payloads carry no edgecommons envelope and are dropped as malformed on normal relay
+paths. Consumers ignore `_relay` (it doubles as the "which path did this message take" breadcrumb).
+Tag keys starting with `_` are library/system-reserved and remain orthogonal metadata, not message
+body content.
 
 ### `reply_to` rewrite — the TTL'd correlation map (§2.4 / D-B9)
 
@@ -86,9 +91,9 @@ the reply path:
    subscribes it on the device bus (**before** relaying the cmd; `max_messages = 1`,
    first-reply-wins) and records `bridge topic → original site reply topic` in the correlation
    map. A `cmd` **without** `reply_to` is a fire-and-forget notification and relays untouched.
-2. **Up**: the first message on a bridge reply topic relays to the **original site `reply_to`**
-   verbatim — `correlation_id` and body untouched, hop tag appended, `header.reply_to` dropped —
-   then the entry is removed and the bridge topic unsubscribed (one-shot).
+2. **Up**: the first protobuf message on a bridge reply topic relays to the **original site `reply_to`**
+   after decode/mutate/re-encode — `correlation_id` and body untouched, hop tag appended,
+   `header.reply_to` dropped — then the entry is removed and the bridge topic unsubscribed (one-shot).
 3. **TTL sweep**: entries expire after `reply.ttlSecs` (default **60 s = 2×** the framework's 30 s
    request-deadline default — raise them **in step**, a paired knob); expiry unsubscribes the
    bridge topic and counts `reply_expired`. The map is bounded by `reply.maxPending` (default
@@ -115,7 +120,8 @@ decision:
   `evt`**: events/alarms ride a bounded, memory-only, **drop-oldest** replay buffer
   (`bufferWhileDisconnected`, default **on**, **1000**) — a WAN blip must not lose an alarm
   raise/clear. On reconnect a watcher task replays the buffered `evt` **strictly in order**
-  (topic-verbatim, hop tag already stamped) and the buffer clears (`evt_replayed`); overflow while
+  (topic-verbatim, hop tag already stamped in the protobuf envelope) and the buffer clears
+  (`evt_replayed`); overflow while
   down evicts the oldest (`evt_buffer_dropped`). A live `evt` arriving while older ones are still
   queued joins the queue rather than overtaking them.
 - **Reconnect rehydration** (DESIGN-uns §9.3 layer 2) — on the site-reconnect **rising edge** the
@@ -149,8 +155,9 @@ Every **30 s** a task snapshots the relay counters and emits them through `gg.me
 
 **Site LWT** (§2.6/§3.7, D-B11): at startup the bridge derives the site Last-Will topic from its
 **real** state topic (`gg.uns().topic(State)` — what the keepalive actually publishes on). Payload is
-fixed to `{"status":"UNREACHABLE"}`, QoS is fixed to 1, and retain remains disabled in the provider.
-This is a private bridge-console contract, not user configuration.
+a protobuf EdgeCommons `state` envelope from the bridge identity with `status:"UNREACHABLE"`, QoS is
+fixed to 1, and retain remains disabled in the provider. This is a private bridge-console contract,
+not user configuration.
 
 ## Configuration (§2.7)
 
@@ -233,9 +240,9 @@ standing `edgecommons-emqx` on `:1883` or the P3-5 site broker on `:1884` — ov
 bridge binary** against the shipped sample config (ports swapped in) and asserts, over live MQTT,
 per assertion with a printed PASS/FAIL:
 
-- **A1–A3 uplink** — a `state` envelope, an `evt` envelope (with channel), and a **raw** `data`
-  payload published on the device bus arrive **topic-verbatim** on the site broker; envelopes carry
-  the appended hop tag, the raw payload is **byte-verbatim**;
+- **A1–A3 uplink** — a `state` message, an `evt` message (with channel), and a `data` message with an
+  **opaque protobuf body** published on the device bus arrive **topic-verbatim** on the site broker;
+  each envelope carries the appended hop tag, and the opaque body bytes are preserved;
 - **B downlink** — an own-device `cmd` published on the site broker arrives (hop-tagged) on the
   device bus;
 - **C pinning** — a `cmd` addressed to another device is **not** relayed;
@@ -272,7 +279,7 @@ The bridge and the site broker deploy **as a pair** — see
 `greengrass/recipe.yaml` sketch running the same compose via
 `aws.greengrass.DockerApplicationManager`, `k8s/` manifests for the in-cluster aggregation broker
 (no bridge runs inside a cluster, with one documented boundary-pod exception), and the per-device
-**ACL** (`acl.conf`) that is the actual security boundary — the bridge's own raw-provider relay
+**ACL** (`acl.conf`) that is the actual security boundary — the bridge's own provider-level relay
 (§1.3 above) carries no in-process guard, so an ACL-less site broker has no boundary at all.
 
 ## Repo layout
@@ -283,9 +290,9 @@ The bridge and the site broker deploy **as a pair** — see
 | `src/reply.rs` | The **pure** §2.4 reply proxy logic: the TTL'd correlation map (`rewrite_downlink`/`take`/`sweep`, evict-oldest) + the reply back-haul transform — no IO, injected clock |
 | `src/policy.rs` | The **pure** §2.5/D-B10 uplink policy: per-class enables, token buckets (injected clock), and the bounded drop-oldest `evt` replay buffer — no IO |
 | `src/observability.rs` | The **pure** §2.8 pieces: the counter→metric mapping (snapshot deltas → named measure groups) — no IO |
-| `src/io.rs` | The pumps: raw-provider subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (rising-edge rehydration broadcast + evt replay) + the 30 s metric emission; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
+| `src/io.rs` | The pumps: provider-level subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (rising-edge rehydration broadcast + evt replay) + the 30 s metric emission; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
 | `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; the relay's `-relay`-suffixed device connection; typed `reply` + `uplink` knobs |
-| `src/main.rs` | The EdgeCommons runtime (observability) + the relay's raw connections (device fatal, site retried), private derived site LWT, graceful stop |
+| `src/main.rs` | The EdgeCommons runtime (observability) + the relay's provider-level connections (device fatal, site retried), private derived site LWT, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `tests/e2e_dual_broker.rs`, `tests/e2e/` | The P3-6 **dual-EMQX end-to-end test** (real binary between two real brokers, assertions A–F above) + its rig (`run.sh`, `docker-compose.e2e.yml`) |
 | `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs for the **bridge itself** (finalized with the GREENGRASS/IPC variant follow-up) |

@@ -12,24 +12,24 @@
 //! ## Why (§2.4)
 //! A site-side requester (e.g. the console) sets
 //! `header.reply_to = edgecommons/reply-<uuid>` — an ephemeral topic **on the site
-//! broker**. Relayed verbatim, the device-side responder would `reply()` onto the
+//! broker**. Without rewriting, the device-side responder would `reply()` onto the
 //! device bus where nobody is subscribed. The bridge therefore proxies the reply
 //! path: rewrite going down, relay back going up.
 //!
 //! ## Semantics
-//! - **Downlink rewrite** ([`ReplyCorrelator::rewrite_downlink`]) happens only
-//!   when `header.reply_to` is present — a `cmd` without it is a
-//!   notification-style command (normative per the canonical doc §4.3) and relays
-//!   untouched, as do raw (non-envelope) commands, which carry no header at all.
+//! - **Downlink rewrite** ([`ReplyCorrelator::rewrite_downlink`]) decodes the
+//!   already-relayed protobuf envelope and happens only when `header.reply_to`
+//!   is present. A `cmd` without it is a notification-style command (normative
+//!   per the canonical doc §4.3) and relays untouched.
 //! - The minted topic uses the core's standard `edgecommons/reply-` prefix
 //!   ([`new_reply_topic`]), so it is structurally exempt from the reserved-class
 //!   guard (D-U6) and indistinguishable from any other reply topic to the
 //!   responder.
-//! - **The reply relays verbatim** ([`prepare_reply`]) — `correlation_id`, body,
-//!   identity, and every other tag untouched. The only changes: the hop tag is
-//!   appended (§2.4: "it is a relay like any other"), and `header.reply_to` is
-//!   dropped — a reply carries none, and a device-bus topic would be meaningless
-//!   at the site anyway. A raw reply relays byte-for-byte.
+//! - **The reply relays with protobuf decode/mutate/re-encode**
+//!   ([`prepare_reply`]) — `correlation_id`, body, identity, and every other tag
+//!   untouched. The only changes: the hop tag is appended (§2.4: "it is a relay
+//!   like any other"), and `header.reply_to` is dropped — a reply carries none,
+//!   and a device-bus topic would be meaningless at the site anyway.
 //! - **TTL** (`reply.ttlSecs`, default [`DEFAULT_REPLY_TTL_SECS`] = 2× the
 //!   framework's 30 s request-deadline default, `messaging.requestTimeoutSeconds`):
 //!   the bridge never tears down a reply path before the requester's own deadline
@@ -85,8 +85,8 @@ struct Pending {
 /// What [`ReplyCorrelator::rewrite_downlink`] decided for one forwardable `cmd`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownlinkRewrite {
-    /// No `header.reply_to` (or a raw command): relay the input bytes unchanged —
-    /// a fire-and-forget notification with no reply path to proxy.
+    /// No `header.reply_to`: relay the input protobuf bytes unchanged, as a
+    /// fire-and-forget notification with no reply path to proxy.
     Passthrough,
     /// `header.reply_to` was rewritten to a freshly minted bridge-side topic and
     /// a correlation entry recorded. The caller must subscribe `bridge_topic` on
@@ -102,6 +102,8 @@ pub enum DownlinkRewrite {
         /// count `relay_reply_expired`.
         evicted: Option<String>,
     },
+    /// Do not relay this downlink command.
+    Drop(DropReason),
 }
 
 /// What the reply back-haul should do with a message that arrived on a **live**
@@ -148,24 +150,18 @@ impl ReplyCorrelator {
     /// header, and record `bridge topic → original site reply topic` with
     /// deadline `now + ttl` — evicting the oldest entry when the map is full.
     ///
-    /// A `cmd` without `reply_to`, and any raw command, is [`Passthrough`]
-    /// (`DownlinkRewrite::Passthrough`) — relayed exactly as before this slice.
+    /// A `cmd` without `reply_to` is [`Passthrough`] (`DownlinkRewrite::Passthrough`)
+    /// and relayed exactly as before this slice.
     ///
     /// [`Passthrough`]: DownlinkRewrite::Passthrough
     pub fn rewrite_downlink(&mut self, relayed: &[u8], now: Instant) -> DownlinkRewrite {
         let mut msg = match Message::from_slice(relayed) {
             Ok(m) => m,
             Err(e) => {
-                // decide() parsed these exact bytes one step earlier, so this is
-                // unreachable in the wired pump; fall back to the pre-P3-3
-                // behavior (relay unchanged) rather than dropping a command.
-                tracing::warn!(error = %e, "unparseable relayed cmd; relaying without reply rewrite");
-                return DownlinkRewrite::Passthrough;
+                tracing::warn!(error = %e, "malformed relayed cmd envelope");
+                return DownlinkRewrite::Drop(DropReason::MalformedEnvelope);
             }
         };
-        if msg.is_raw() {
-            return DownlinkRewrite::Passthrough;
-        }
         let Some(site_reply_to) = msg.header.reply_to.clone() else {
             // Fire-and-forget notification cmd (§2.4) — no reply path to proxy.
             return DownlinkRewrite::Passthrough;
@@ -176,10 +172,8 @@ impl ReplyCorrelator {
         let bytes = match msg.to_vec() {
             Ok(b) => b,
             Err(e) => {
-                // Unreachable for the same reason as above; keep the map free of
-                // an entry whose rewritten bytes never got relayed.
-                tracing::warn!(error = %e, "cannot re-serialize rewritten cmd; relaying without reply rewrite");
-                return DownlinkRewrite::Passthrough;
+                tracing::warn!(error = %e, "cannot re-serialize rewritten cmd");
+                return DownlinkRewrite::Drop(DropReason::MalformedEnvelope);
             }
         };
 
@@ -271,15 +265,14 @@ impl ReplyCorrelator {
 /// Turn a message that arrived on a **live** bridge-side reply topic into the
 /// bytes to publish on the original site `reply_to` topic.
 ///
-/// Verbatim (§2.4 / D-B9) except for exactly two touches:
+/// Preserved (§2.4 / D-B9) except for exactly two touches:
 /// - `header.reply_to` is dropped — a reply carries none, and the bridge-side
 ///   device topic would be meaningless at the site;
 /// - the hop tag is appended via [`RelayEngine::stamp_hop`] ("it is a relay like
 ///   any other"), whose rules also apply: an own-echo or over-`maxHops` reply is
 ///   a [`ReplyRelay::Drop`].
 ///
-/// `correlation_id`, body, identity, and every other tag are untouched. A **raw**
-/// (non-envelope) reply relays byte-for-byte.
+/// `correlation_id`, body, identity, and every other tag are untouched.
 pub fn prepare_reply(engine: &RelayEngine, payload: &[u8]) -> ReplyRelay {
     let mut msg = match Message::from_slice(payload) {
         Ok(m) => m,
@@ -288,9 +281,6 @@ pub fn prepare_reply(engine: &RelayEngine, payload: &[u8]) -> ReplyRelay {
             return ReplyRelay::Drop(DropReason::MalformedEnvelope);
         }
     };
-    if msg.is_raw() {
-        return ReplyRelay::Forward(payload.to_vec());
-    }
     msg.header.reply_to = None;
     if let Err(reason) = engine.stamp_hop(&mut msg) {
         return ReplyRelay::Drop(reason);
@@ -308,6 +298,7 @@ pub fn prepare_reply(engine: &RelayEngine, payload: &[u8]) -> ReplyRelay {
 mod tests {
     use super::*;
     use crate::relay::{RelayEngine, DEFAULT_MAX_HOPS, RELAY_TAG};
+    use edgecommons::messaging::message::MessageBodyCase;
     use edgecommons::messaging::request_reply::REPLY_TOPIC_PREFIX;
     use edgecommons::messaging::MessageBuilder;
     use serde_json::{json, Value};
@@ -331,6 +322,14 @@ mod tests {
             b = b.reply_to(r);
         }
         b.build().to_vec().unwrap()
+    }
+
+    fn decoded(bytes: &[u8]) -> Message {
+        Message::from_slice(bytes).unwrap()
+    }
+
+    fn projected(bytes: &[u8]) -> Value {
+        serde_json::to_value(decoded(bytes)).unwrap()
     }
 
     /// Rewrite `cmd(Some(SITE_REPLY))` and unwrap the `Rewritten` fields.
@@ -369,25 +368,23 @@ mod tests {
     }
 
     #[test]
-    fn raw_cmd_is_passthrough() {
+    fn non_protobuf_cmd_is_dropped() {
         let mut c = correlator(60, 1024);
         let raw = serde_json::to_vec(&json!({ "do": "reload" })).unwrap();
         assert_eq!(
             c.rewrite_downlink(&raw, Instant::now()),
-            DownlinkRewrite::Passthrough
+            DownlinkRewrite::Drop(DropReason::MalformedEnvelope)
         );
         assert!(c.is_empty());
     }
 
     #[test]
-    fn unparseable_cmd_is_passthrough_not_dropped() {
-        // Unreachable via the wired pump (decide() parsed the same bytes one
-        // step earlier); the fallback is the pre-P3-3 behavior: relay unchanged.
+    fn unparseable_cmd_is_dropped() {
         let mut c = correlator(60, 1024);
         let malformed = serde_json::to_vec(&json!({ "header": 42, "body": {} })).unwrap();
         assert_eq!(
             c.rewrite_downlink(&malformed, Instant::now()),
-            DownlinkRewrite::Passthrough
+            DownlinkRewrite::Drop(DropReason::MalformedEnvelope)
         );
         assert!(c.is_empty());
     }
@@ -402,13 +399,14 @@ mod tests {
         assert_ne!(bridge_topic, SITE_REPLY);
         assert!(evicted.is_none());
 
-        // The relayed envelope: reply_to rewritten, everything else verbatim.
-        let mut input: Value = serde_json::from_slice(&cmd(Some(SITE_REPLY))).unwrap();
-        let output: Value = serde_json::from_slice(&bytes).unwrap();
+        // The relayed envelope: reply_to rewritten, diagnostic projection otherwise preserved.
+        let mut input = projected(&cmd(Some(SITE_REPLY)));
+        let output = projected(&bytes);
         input["header"]["reply_to"] = json!(bridge_topic.clone());
         // (uuid/timestamp differ per build — pin them from the output)
         input["header"]["uuid"] = output["header"]["uuid"].clone();
         input["header"]["timestamp"] = output["header"]["timestamp"].clone();
+        input["header"]["timestamp_ms"] = output["header"]["timestamp_ms"].clone();
         assert_eq!(output, input, "only header.reply_to may change");
         assert_eq!(output["header"]["correlation_id"], "corr-9");
 
@@ -417,6 +415,35 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert_eq!(c.take(&bridge_topic), Some(SITE_REPLY.to_string()));
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn rewrite_downlink_preserves_opaque_body_bytes() {
+        let mut c = correlator(60, 1024);
+        let opaque = [0xde, 0xad, 0xbe, 0xef];
+        let cmd = MessageBuilder::new("send-frame", "1.0")
+            .opaque_body(opaque, "application/x-protobuf")
+            .unwrap()
+            .correlation_id("corr-opaque")
+            .reply_to(SITE_REPLY)
+            .build()
+            .to_vec()
+            .unwrap();
+
+        let DownlinkRewrite::Rewritten {
+            bytes,
+            bridge_topic,
+            ..
+        } = c.rewrite_downlink(&cmd, Instant::now())
+        else {
+            panic!("expected rewrite")
+        };
+        let out = decoded(&bytes);
+        assert_eq!(out.header.reply_to.as_deref(), Some(bridge_topic.as_str()));
+        assert_eq!(out.header.correlation_id, "corr-opaque");
+        assert_eq!(out.body_case(), MessageBodyCase::Opaque);
+        assert_eq!(out.content_type.as_deref(), Some("application/x-protobuf"));
+        assert_eq!(out.opaque_body().unwrap().unwrap(), opaque);
     }
 
     #[test]
@@ -550,7 +577,7 @@ mod tests {
     // ---- the reply back-haul transform (prepare_reply) ----
 
     #[test]
-    fn reply_relays_verbatim_plus_hop_tag_minus_reply_to() {
+    fn reply_preserves_message_plus_hop_tag_minus_reply_to() {
         let reply = MessageBuilder::new("reload-config-reply", "1.0")
             .payload(json!({ "ok": true, "nested": { "a": [1, 2, 3] } }))
             .tag("site", json!("dallas"))
@@ -564,8 +591,8 @@ mod tests {
         let ReplyRelay::Forward(out) = prepare_reply(&engine(), &reply) else {
             panic!("expected forward")
         };
-        let mut input: Value = serde_json::from_slice(&reply).unwrap();
-        let output: Value = serde_json::from_slice(&out).unwrap();
+        let mut input = projected(&reply);
+        let output = projected(&out);
         // Exactly two touches: reply_to gone, hop tag appended.
         input["header"].as_object_mut().unwrap().remove("reply_to");
         input["tags"][RELAY_TAG] = json!([HOP]);
@@ -581,21 +608,47 @@ mod tests {
     }
 
     #[test]
-    fn raw_json_reply_relays_byte_for_byte() {
+    fn non_protobuf_json_reply_is_dropped() {
         let payload = serde_json::to_vec(&json!({ "ok": true })).unwrap();
         assert_eq!(
             prepare_reply(&engine(), &payload),
-            ReplyRelay::Forward(payload)
+            ReplyRelay::Drop(DropReason::MalformedEnvelope)
         );
     }
 
     #[test]
-    fn raw_non_json_reply_relays_byte_for_byte() {
+    fn non_protobuf_reply_is_dropped() {
         let payload = b"plain ack".to_vec();
         assert_eq!(
             prepare_reply(&engine(), &payload),
-            ReplyRelay::Forward(payload)
+            ReplyRelay::Drop(DropReason::MalformedEnvelope)
         );
+    }
+
+    #[test]
+    fn prepare_reply_preserves_opaque_body_bytes() {
+        let opaque = [0x10, 0x20, 0x30, 0xff];
+        let reply = MessageBuilder::new("frame-reply", "1.0")
+            .opaque_body(opaque, "image/jpeg")
+            .unwrap()
+            .tag("site", json!("dallas"))
+            .correlation_id("corr-opaque-reply")
+            .reply_to("edgecommons/reply-device-local")
+            .build()
+            .to_vec()
+            .unwrap();
+        let ReplyRelay::Forward(out) = prepare_reply(&engine(), &reply) else {
+            panic!("expected forward")
+        };
+        let decoded = decoded(&out);
+        assert_eq!(decoded.header.correlation_id, "corr-opaque-reply");
+        assert!(decoded.header.reply_to.is_none());
+        assert_eq!(decoded.body_case(), MessageBodyCase::Opaque);
+        assert_eq!(decoded.content_type.as_deref(), Some("image/jpeg"));
+        assert_eq!(decoded.opaque_body().unwrap().unwrap(), opaque);
+        let tags = decoded.tags.unwrap().extra;
+        assert_eq!(tags.get("site"), Some(&json!("dallas")));
+        assert_eq!(tags.get(RELAY_TAG), Some(&json!([HOP])));
     }
 
     #[test]

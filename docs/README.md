@@ -34,9 +34,10 @@ detection.
 ## The one-sentence model
 
 The bridge holds **three broker connections** — two to the device bus (one for its own observability,
-one raw one for the relay) and one to the site broker — and pumps messages across a fixed **relay
-matrix**: six UNS classes go **up** (device → site) topic-verbatim, `cmd` comes **down** (site → device)
-pinned to this bridge's own device, and request/reply is proxied through a TTL'd correlation map.
+one provider-level connection for the relay) and one to the site broker — and pumps protobuf
+`EdgeCommonsMessage` bytes across a fixed **relay matrix**: six UNS classes go **up** (device → site)
+topic-verbatim, `cmd` comes **down** (site → device) pinned to this bridge's own device, and
+request/reply is proxied through a TTL'd correlation map.
 Everything else is policy on top of that: loop protection, rate limiting, disconnect buffering, and a
 derived Last-Will for reachability.
 

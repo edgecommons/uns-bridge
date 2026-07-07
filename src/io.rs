@@ -1,13 +1,15 @@
-//! # io — the relay pumps over two raw providers
+//! # io — the relay pumps over two provider-level connections
 //!
 //! **One-liner purpose**: Wire the pure [`RelayEngine`](crate::relay::RelayEngine)
-//! between two raw [`MessagingProvider`] handles — PRIMARY (the device bus) and
-//! SITE (the reused core `MqttProvider` against the site broker) — and pump bytes.
+//! between two [`MessagingProvider`] handles — PRIMARY (the device bus) and SITE
+//! (the reused core `MqttProvider` against the site broker) — and pump protobuf
+//! edgecommons message bytes.
 //!
 //! The relay runs at the **raw provider level** (`publish`/`subscribe` bytes,
 //! DESIGN-uns-bridge §1.3): the reserved-class guard is a `MessagingService`
-//! concern and is simply not in this path — byte relay, not a client-chosen
-//! enveloped publish. The site broker's per-device ACL is the durable boundary.
+//! concern and is simply not in this path. Normal relay payloads are protobuf
+//! `EdgeCommonsMessage` bytes; foreign bytes drop as malformed. The site
+//! broker's per-device ACL is the durable boundary.
 //!
 //! One pump task per subscription (`max_concurrency = 1` semantics — serial,
 //! ordered per class); the per-class `max_messages` bound lives in the provider
@@ -197,13 +199,20 @@ impl ReplyProxy {
     /// relayed because its reply subscription could not be established.
     async fn rewrite_downlink(self: &Arc<Self>, topic: &str, bytes: Vec<u8>) -> Option<Vec<u8>> {
         let action = self.correlator().rewrite_downlink(&bytes, Instant::now());
-        let DownlinkRewrite::Rewritten {
-            bytes,
-            bridge_topic,
-            evicted,
-        } = action
-        else {
-            return Some(bytes); // fire-and-forget cmd / raw — relayed as before
+        let (bytes, bridge_topic, evicted) = match action {
+            DownlinkRewrite::Rewritten {
+                bytes,
+                bridge_topic,
+                evicted,
+            } => (bytes, bridge_topic, evicted),
+            DownlinkRewrite::Passthrough => {
+                return Some(bytes); // fire-and-forget cmd — relayed as before
+            }
+            DownlinkRewrite::Drop(reason) => {
+                self.counters.count_drop(reason);
+                tracing::debug!(topic, ?reason, "downlink reply rewrite dropped cmd");
+                return None;
+            }
         };
         if let Some(oldest) = evicted {
             self.expire(&oldest).await;
@@ -905,6 +914,7 @@ mod tests {
     use super::*;
     use crate::relay::{DEFAULT_MAX_HOPS, RELAY_TAG};
     use async_trait::async_trait;
+    use edgecommons::messaging::message::{Message, MessageBodyCase};
     use edgecommons::messaging::topic_matches;
     use serde_json::{json, Value};
     use std::sync::Mutex;
@@ -1021,6 +1031,14 @@ mod tests {
             .unwrap()
     }
 
+    fn decoded_envelope(bytes: &[u8]) -> Message {
+        Message::from_slice(bytes).unwrap()
+    }
+
+    fn envelope_value(bytes: &[u8]) -> Value {
+        serde_json::to_value(decoded_envelope(bytes)).unwrap()
+    }
+
     async fn started() -> (RelayIo, Arc<FakeProvider>, Arc<FakeProvider>) {
         started_opts(ReplyConfig::default(), UplinkConfig::default()).await
     }
@@ -1086,7 +1104,7 @@ mod tests {
         );
         let (site_topic, bytes) = site.published().remove(0);
         assert_eq!(site_topic, topic, "topic-verbatim relay");
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let v = envelope_value(&bytes);
         assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
         assert_eq!(v["body"]["status"], "RUNNING");
         assert_eq!(
@@ -1144,7 +1162,7 @@ mod tests {
         );
         let (dev_topic, bytes) = device.published().remove(0);
         assert_eq!(dev_topic, topic);
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let v = envelope_value(&bytes);
         assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
         assert_eq!(io.counters().downlinked.load(Ordering::Relaxed), 1);
         io.shutdown().await;
@@ -1174,8 +1192,7 @@ mod tests {
     #[tokio::test]
     async fn relayed_cmd_is_not_echoed_back_up() {
         // Class disjointness (§2.3): the downlink republish of a cmd on the device
-        // bus matches NO uplink filter, so a single bridge can never echo itself
-        // even for raw messages.
+        // bus matches NO uplink filter, so a single bridge can never echo itself.
         let (io, device, site) = started().await;
         let topic = "ecv1/gw-01/opcua-adapter/main/cmd/ping";
         site.publish(topic, envelope(), Destination::Local, Qos::AtLeastOnce)
@@ -1192,10 +1209,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_message_relays_verbatim() {
+    async fn non_protobuf_message_is_dropped_and_counted() {
         let (io, device, site) = started().await;
-        // A raw (non-envelope) data point carries no tags to hop-stamp: it must
-        // relay byte-for-byte (never re-wrapped as `{"raw": …}`).
         let payload = serde_json::to_vec(&json!({ "temperature": 21.5 })).unwrap();
         let topic = "ecv1/gw-01/modbus-adapter/main/data/temp";
         device
@@ -1204,12 +1219,46 @@ mod tests {
             .unwrap();
 
         assert!(
+            wait_until(|| io.counters().malformed_dropped.load(Ordering::Relaxed) == 1).await,
+            "malformed protobuf drop not counted"
+        );
+        assert!(
+            site.published().is_empty(),
+            "foreign payload must not relay"
+        );
+        assert_eq!(io.counters().uplinked.get(UnsClass::Data), 0);
+        io.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn opaque_message_relays_with_body_bytes_intact() {
+        let (io, device, site) = started().await;
+        let topic = "ecv1/gw-01/camera/main/data/frame";
+        let opaque = [0x00, 0x01, 0x02, 0xfe, 0xff];
+        let payload = MessageBuilder::new("frame-preview", "1.0")
+            .opaque_body(opaque, "application/octet-stream")
+            .unwrap()
+            .build()
+            .to_vec()
+            .unwrap();
+        device
+            .publish(topic, payload, Destination::Local, Qos::AtLeastOnce)
+            .await
+            .unwrap();
+
+        assert!(
             wait_until(|| !site.published().is_empty()).await,
-            "raw uplink did not arrive"
+            "opaque uplink did not arrive"
         );
         let (site_topic, bytes) = site.published().remove(0);
         assert_eq!(site_topic, topic);
-        assert_eq!(bytes, payload, "raw payload must relay verbatim");
+        let msg = decoded_envelope(&bytes);
+        assert_eq!(msg.body_case(), MessageBodyCase::Opaque);
+        assert_eq!(msg.opaque_body().unwrap().unwrap(), opaque);
+        assert_eq!(
+            msg.tags.unwrap().extra[RELAY_TAG],
+            json!(["gw-01/uns-bridge"])
+        );
         io.shutdown().await;
     }
 
@@ -1250,11 +1299,10 @@ mod tests {
 
     /// The `header.reply_to` of a relayed envelope.
     fn reply_to_of(bytes: &[u8]) -> String {
-        let v: Value = serde_json::from_slice(bytes).unwrap();
-        v["header"]["reply_to"]
-            .as_str()
+        decoded_envelope(bytes)
+            .header
+            .reply_to
             .expect("relayed cmd must carry reply_to")
-            .to_string()
     }
 
     /// Relay one cmd-with-reply_to downlink and return its bridge reply topic.
@@ -1294,7 +1342,7 @@ mod tests {
             bridge_topic, SITE_REPLY,
             "the site reply topic must not leak down"
         );
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let v = envelope_value(&bytes);
         assert_eq!(v["header"]["correlation_id"], "corr-1");
         assert_eq!(v["body"]["why"], "test");
         assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
@@ -1327,8 +1375,8 @@ mod tests {
             .await
             .unwrap();
 
-        // The reply lands on the ORIGINAL site reply topic, verbatim except the
-        // hop tag: correlation id + body preserved, reply_to absent.
+        // The reply lands on the ORIGINAL site reply topic after protobuf
+        // decode/re-encode: correlation id + body preserved, reply_to absent.
         assert!(
             wait_until(|| site.published().iter().any(|(t, _)| t == SITE_REPLY)).await,
             "reply did not reach the site broker"
@@ -1338,7 +1386,7 @@ mod tests {
             .into_iter()
             .find(|(t, _)| t == SITE_REPLY)
             .unwrap();
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let v = envelope_value(&bytes);
         assert_eq!(
             v["header"]["correlation_id"], "corr-1",
             "correlation_id preserved"
@@ -1371,7 +1419,7 @@ mod tests {
 
         assert!(wait_until(|| !device.published().is_empty()).await);
         let (_, bytes) = device.published().remove(0);
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let v = envelope_value(&bytes);
         assert!(
             v["header"].get("reply_to").is_none(),
             "no reply_to must be minted"
@@ -1559,7 +1607,7 @@ mod tests {
             .iter()
             .filter(|(t, _)| t == EVT_TOPIC)
             .map(|(_, b)| {
-                let v: Value = serde_json::from_slice(b).unwrap();
+                let v = envelope_value(b);
                 v["body"]["n"].as_u64().unwrap()
             })
             .collect()
@@ -1743,7 +1791,7 @@ mod tests {
         // + the §2.3 hop tag — stamped before buffering).
         let (topic, bytes) = site.published().remove(0);
         assert_eq!(topic, EVT_TOPIC);
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let v = envelope_value(&bytes);
         assert_eq!(v["tags"][RELAY_TAG], json!(["gw-01/uns-bridge"]));
         io.shutdown().await;
     }
@@ -1934,14 +1982,14 @@ mod tests {
         let topics: Vec<&str> = bcasts.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(topics, vec![BCAST_STATE, BCAST_CFG]);
         // Notification-style cmd envelopes: named, no reply_to, empty body.
-        let v: Value = serde_json::from_slice(&bcasts[0].1).unwrap();
+        let v = envelope_value(&bcasts[0].1);
         assert_eq!(v["header"]["name"], "republish-state");
         assert!(
             v["header"].get("reply_to").is_none(),
             "a broadcast expects no reply"
         );
         assert_eq!(v["body"], json!({}));
-        let v: Value = serde_json::from_slice(&bcasts[1].1).unwrap();
+        let v = envelope_value(&bcasts[1].1);
         assert_eq!(v["header"]["name"], "republish-cfg");
 
         // And nothing echoed back up: cmd matches no uplink filter (§2.2).

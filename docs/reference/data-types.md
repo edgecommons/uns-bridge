@@ -1,33 +1,39 @@
 # Reference — Data Types
 
-The bridge is a relay, not a codec — it does **not** decode payloads into typed values. What it *does* read
-and write are a small set of **envelope structures**: the edgecommons message envelope (to append a hop tag and,
-for a reply, to rewrite a header), the reserved `_relay` hop tag, the reply `reply_to`, and the UNS class
-taxonomy that decides routing. This page is the reference for those structures. For the topics and messages
-they ride on, see [messaging-interface.md](messaging-interface.md).
+The bridge is a relay, not an application codec — it does **not** interpret business payloads. What it *does*
+read and write are a small set of **protobuf envelope structures**: the edgecommons message envelope (to append
+a hop tag and, for a reply, to rewrite a header), the reserved `_relay` hop tag, the reply `reply_to`, and the
+UNS class taxonomy that decides routing. This page is the reference for those structures. For the topics and
+messages they ride on, see [messaging-interface.md](messaging-interface.md).
 
-## Envelope vs raw — the fundamental split
+## Protobuf envelope and diagnostic JSON
 
-Every message the bridge touches is one of two kinds, and it treats them differently:
+Normal EdgeCommons messages on MQTT are protobuf `EdgeCommonsMessage` bytes. The bridge decodes those bytes,
+mutates only the relay metadata it owns, and re-encodes protobuf before republishing.
 
-| Kind | What it is | How the bridge relays it |
+| Kind | What it is | How the bridge treats it |
 |------|-----------|--------------------------|
-| **Envelope** | A edgecommons message: a JSON object with a `header` (and optionally `identity`, `tags`, `body`). | Parsed; the **hop tag** is appended (and for a reply, `header.reply_to` is stripped); re-serialized and forwarded. Structurally identical to the input except those touches. |
-| **Raw** | Anything else — a bare JSON value with no envelope shape, or non-JSON bytes. | Forwarded **byte-for-byte**. No tag is added (there is nowhere to put one); never re-wrapped as `{"raw": …}`. |
+| **EdgeCommons message** | Protobuf bytes for the standard `{ header, identity, tags, body }` envelope. | Decoded; the **hop tag** is appended (and for replies, `header.reply_to` is rewritten or stripped); re-encoded and forwarded. Opaque body bytes are preserved inside the envelope. |
+| **Foreign / non-protobuf bytes** | Anything that cannot decode as an edgecommons protobuf envelope, including a hand-written JSON object sent directly to MQTT. | Dropped as `MalformedEnvelope`; counted in `relay_malformed_dropped`. |
 
-A message that *claims* to be an envelope but is malformed (e.g. `header` is not an object) is **dropped**
-(`MalformedEnvelope`), not forwarded — a structurally broken envelope is a bug, not a payload to pass on.
+JSON appears in these docs only as a **diagnostic projection after protobuf decode**. It is useful for logs,
+tests, documentation, and UI inspection, but it is not the normal wire payload. If an application needs to carry
+opaque bytes such as an image, a PLC frame, or another protobuf, those bytes belong in the message body as the
+protobuf opaque body, with a content type.
 
-The consequence for loop protection: raw messages cannot carry the hop tag, so they rely entirely on the
-**class-disjointness** structural guard (uplink and downlink relay disjoint class sets — see
-[messaging-interface.md](messaging-interface.md#the-relay-matrix)).
+The consequence for loop protection: every relayable message has an envelope that can carry the hop tag. The
+uplink/downlink class-disjointness still provides an additional structural guard (see
+[messaging-interface.md](messaging-interface.md#the-relay-matrix)), but non-protobuf bytes are not a relayable
+fallback path.
 
 ## The EdgeCommons envelope
 
-The standard edgecommons envelope: `{ header, identity, tags, body }`. The bridge only ever
-reads/writes `header` (for replies) and `tags` (for the hop tag); `identity` and `body` travel untouched.
+The standard edgecommons envelope is encoded as protobuf. The bridge only ever reads/writes `header` (for
+replies) and `tags` (for the hop tag); `identity` and `body` travel untouched. In particular, envelope `tags`
+are orthogonal metadata and are unrelated to the opaque/application payload carried in `body`.
 
 ```jsonc
+// Diagnostic JSON projection after protobuf decode, not wire bytes.
 {
   "header": {
     "name": "reload-config",                 // the message/verb name
@@ -45,8 +51,9 @@ reads/writes `header` (for replies) and `tags` (for the hop tag); `identity` and
 }
 ```
 
-The bridge never invents an `identity` or `body`, never re-orders members meaningfully (serde member order is
-deterministic; structural equality is what's guaranteed), and touches exactly the two things below.
+The bridge never invents an `identity` or `body`. Protobuf bytes may be re-encoded after mutation, so byte
+identity of the whole envelope is not the contract; semantic envelope identity is, except for the two touches
+below. Opaque body bytes are preserved byte-for-byte inside the body.
 
 ## The `_relay` hop tag
 
@@ -55,7 +62,7 @@ The reserved envelope tag `tags._relay` is the bridge's loop-protection ledger.
 | Aspect | Value |
 |--------|-------|
 | Key | `_relay` (the `_` prefix marks a library/system-reserved tag key, alongside `_bcast`). |
-| Type | A JSON **array of strings**. |
+| Type | A protobuf list value containing strings; diagnostic JSON renders it as an array of strings. |
 | Element | A **hop id**: `{device}/uns-bridge` (this bridge's device token + the component token). |
 | Order | Insertion order — each bridge appends its own id to the end; foreign hops are preserved in order. |
 
@@ -68,25 +75,26 @@ The three rules the bridge applies before appending (see [explanation](../explan
 Edge behaviors, exactly as implemented:
 
 - An envelope with **no `tags` member** grows one containing just `_relay` on first hop.
-- A **non-array** `_relay` (a spec violation by some non-conforming relay) is **normalized** to a fresh array
+- A **non-list** `_relay` (a spec violation by some non-conforming relay) is **normalized** to a fresh list
   (with a warning); the `maxHops` cap still bounds any residual cycle.
-- A **raw** message is a no-op for hop-stamping — it never grows a `tags` member.
+- A **non-protobuf** message is not hop-stamped or forwarded; it drops as `MalformedEnvelope`.
 - Consumers should **ignore** `_relay` for business logic; it doubles as a "which bridges did this traverse"
   breadcrumb.
 
 ## `reply_to` — the two rewrites
 
-`header.reply_to` is the only header field the bridge modifies, and it does so in exactly two places, only for
-**envelope** commands/replies (raw ones pass byte-for-byte):
+`header.reply_to` is the only header field the bridge modifies, and it does so in exactly two places, only
+after decoding protobuf commands/replies:
 
 | Where | What the bridge does |
 |-------|----------------------|
 | **Downlink `cmd` with `reply_to`** | Replaces the site-side `reply_to` (e.g. `edgecommons/reply-<uuid>` on the *site* broker) with a **freshly minted** `edgecommons/reply-<uuid>` topic on the *device* bus, subscribes that topic, and records `bridge topic → original site reply_to`. A `cmd` **without** `reply_to` is a fire-and-forget notification — passed through untouched. |
 | **The reply back-haul** | `header.reply_to` is **dropped** entirely (a reply carries none, and a device-bus topic is meaningless at the site). |
 
-`correlation_id`, `body`, `identity`, and every other tag are preserved verbatim across both. The minted topic
+`correlation_id`, `body`, `identity`, and every other tag are preserved across both rewrites. The minted topic
 uses the core's standard `edgecommons/reply-` prefix, so it is a non-UNS topic (never matches a UNS filter) and
-is structurally exempt from the reserved-class guard.
+is structurally exempt from the reserved-class guard. A non-protobuf command or reply is dropped as malformed,
+not proxied as opaque transport bytes.
 
 ## The UNS class taxonomy (what routes where)
 
@@ -133,7 +141,8 @@ derived by the bridge, not configured:
 | Field | Value |
 |-------|-------|
 | topic | `ecv1/{device}/uns-bridge/main/state` (the bridge's resolved state topic) |
-| payload | `{ "status": "UNREACHABLE" }` |
+| payload | protobuf EdgeCommons `state` envelope from the bridge identity |
+| body | `{ "status": "UNREACHABLE" }` |
 | qos | `1` |
 
 Because the will lands on the bridge's own `state` topic, a site console tracking `ecv1/+/+/+/state` sees the
@@ -165,5 +174,5 @@ Every non-forward decision has a reason, which maps to a counter:
 | `NotUnsTopic` | topic isn't a valid `ecv1/…/{class}` UNS topic | `relay_routed_dropped` |
 | `ClassNotRelayed` | class doesn't flow in this direction (e.g. `cmd` on uplink) | `relay_routed_dropped` |
 | `NotOwnDevice` | a downlink `cmd` for a different device | `relay_routed_dropped` |
-| `MalformedEnvelope` | claims to be an envelope but isn't structurally valid | `relay_malformed_dropped` |
+| `MalformedEnvelope` | payload cannot decode as a valid edgecommons protobuf envelope | `relay_malformed_dropped` |
 | (disabled / rate / disconnected) | uplink policy verdicts, per class | `relay_dropped_disabled` / `_rate` / `_disconnected` |
