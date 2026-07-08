@@ -42,15 +42,13 @@
 //!
 //! ## Run locally (HOST, device broker :1883 + site broker :1884)
 //! ```bash
-//! cargo run -- --config ./test-configs/config.json --thing gw-01
+//! cargo run -- --platform HOST --transport MQTT ./test-configs/config.json \
+//!   -c FILE ./test-configs/config.json -t gw-01
 //! ```
 //!
 //! ## Follow-ups (see README "Roadmap")
 //! - GREENGRASS variant (PRIMARY = Nucleus IPC) — P3-2..4b target the HOST
 //!   MQTT↔MQTT pair.
-//! - The standard `-c`/`--platform`/`--transport` CLI contract (today the bridge's
-//!   minimal `--config`/`--thing` CLI synthesizes the standard argv internally)
-//!   and template substitution across the whole `instances[]` entry.
 //! - The device-side `republish-state`/`republish-cfg` listener (a 4-language
 //!   edgecommons library slice) — until it lands, the reconnect rehydration
 //!   broadcast is inert.
@@ -89,52 +87,6 @@ const COMPONENT_NAME: &str = "com.mbreissi.edgecommons.UnsBridge";
 /// Delay between site-broker connect attempts (§1.4 — bridge-owned retry loop).
 const SITE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
-/// Minimal bridge arguments. The standard edgecommons CLI contract is synthesized
-/// from these for the runtime build (full contract = a documented follow-up).
-struct Args {
-    config_path: String,
-    thing: String,
-}
-
-fn parse_args() -> anyhow::Result<Args> {
-    let mut config_path = "test-configs/config.json".to_string();
-    let mut thing: Option<String> = None;
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "-c" | "--config" => {
-                config_path = it.next().context("--config requires a path")?;
-            }
-            "-t" | "--thing" => {
-                // The full string value (the historical one-char truncation bug is
-                // exactly what the standard contract guards against).
-                thing = Some(it.next().context("--thing requires a name")?);
-            }
-            "-h" | "--help" => {
-                println!(
-                    "uns-bridge — UNS relay between the device bus and the site broker\n\n\
-                     USAGE: uns-bridge [--config <file>] [--thing <device>]\n\n\
-                     OPTIONS:\n  \
-                     -c, --config <file>   bridge config (default: test-configs/config.json)\n  \
-                     -t, --thing <name>    device (thing) token; falls back to $EDGECOMMONS_THING_NAME"
-                );
-                std::process::exit(0);
-            }
-            other => anyhow::bail!("unknown argument '{other}' (see --help)"),
-        }
-    }
-    // Standard identity chain, minimally: -t ▸ platform env. (Full chain with the
-    // facade integration.)
-    let thing = thing
-        .or_else(|| {
-            std::env::var("EDGECOMMONS_THING_NAME")
-                .ok()
-                .filter(|v| !v.is_empty())
-        })
-        .context("device identity required: pass -t/--thing or set EDGECOMMONS_THING_NAME")?;
-    Ok(Args { config_path, thing })
-}
-
 /// §1.4: the uplink is intermittent by design — the bridge must come up and serve
 /// the device bus while the WAN is down, so the site connect retries forever in
 /// the bridge's own loop (`MqttProvider::connect_with_last_will` itself blocks ≤ 10 s per try).
@@ -166,37 +118,24 @@ fn site_unreachable_last_will(topic: String, payload: Vec<u8>) -> MqttLastWill {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = parse_args()?;
-    let cfg = BridgeConfig::load(&args.config_path).await?;
-    let site_entry = cfg.site_instance()?;
-
     // §2.8: the edgecommons runtime — the bridge's OBSERVABILITY device-bus
     // connection plus identity, logging init, the heartbeat `state` keepalive,
     // the effective-config `cfg` publisher, gg.metrics(), and the library-owned
-    // SIGTERM/Ctrl-C shutdown signal. The bridge's config file doubles as the
-    // `--transport MQTT` payload (its top-level `messaging` section IS that
-    // shape), so one file feeds both. A dead device bus is fatal — the bridge is
+    // SIGTERM/Ctrl-C shutdown signal. A dead device bus is fatal — the bridge is
     // useless without it (unlike the site uplink, which retries below).
     let gg = EdgeCommonsBuilder::new(COMPONENT_NAME)
-        .args(vec![
-            "uns-bridge".to_string(),
-            "--platform".to_string(),
-            "HOST".to_string(),
-            "--transport".to_string(),
-            "MQTT".to_string(),
-            args.config_path.clone(),
-            "-c".to_string(),
-            "FILE".to_string(),
-            args.config_path.clone(),
-            "-t".to_string(),
-            args.thing.clone(),
-        ])
+        .args(std::env::args_os())
         .build()
         .await
         .context("initializing the edgecommons runtime — is the device-bus broker up?")?;
+    let runtime_config = gg.config();
+    let device = runtime_config.identity().device().to_string();
+    let cfg = BridgeConfig::from_value(runtime_config.raw.clone())
+        .context("parsing bridge settings from the effective EdgeCommons config")?;
+    let site_entry = cfg.site_instance()?;
 
     let engine = Arc::new(RelayEngine::new(
-        &args.thing,
+        &device,
         site_entry.effective_max_hops(),
         site_entry.uplink.app_enabled(),
     )?);
@@ -231,7 +170,6 @@ async fn main() -> anyhow::Result<()> {
         .uns()
         .topic(UnsClass::State)
         .context("deriving the private site LWT topic from the bridge state topic")?;
-    let runtime_config = gg.config();
     let site_lwt_payload = MessageBuilder::new("state", "1.0")
         .from_config(runtime_config.as_ref())
         .state_update(json!({ "status": "UNREACHABLE" }))

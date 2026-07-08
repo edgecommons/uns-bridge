@@ -207,14 +207,18 @@ once at shutdown.
 
 ```bash
 # device broker on :1883 (the standard edgecommons test-infra EMQX) and a site broker on :1884
-cargo run -- --config ./test-configs/config.json --thing gw-01
+cargo run -- --platform HOST --transport MQTT ./test-configs/config.json \
+  -c FILE ./test-configs/config.json -t gw-01
 ```
 
-Device identity: `-t/--thing` or `EDGECOMMONS_THING_NAME`. Logging is owned by the edgecommons
-runtime (the config's `logging` section; default console `info`). Graceful shutdown (Ctrl-C /
-SIGTERM, via the library's signal watcher) aborts the pumps and **unsubscribes every filter at
-both brokers** before exit. The bridge's own `state` keepalive / `cfg` announce / `metric`
-emission appear on the device bus immediately and on the site broker once the relay runs.
+The bridge uses the standard edgecommons CLI: `--platform`, `--transport`, `-c/--config`, and
+`-t/--thing`. For `CONFIG_COMPONENT`, pass a bootstrap MQTT config to `--transport MQTT` and let
+the ConfigComponent serve the effective bridge config through `-c CONFIG_COMPONENT`. Logging is
+owned by the edgecommons runtime (the config's `logging` section; default console `info`).
+Graceful shutdown (Ctrl-C / SIGTERM, via the library's signal watcher) aborts the pumps and
+**unsubscribes every filter at both brokers** before exit. The bridge's own `state` keepalive /
+`cfg` announce / `metric` emission appear on the device bus immediately and on the site broker
+once the relay runs.
 
 ## Building
 
@@ -330,9 +334,7 @@ Still deferred (genuinely unbuilt):
   feature today only compiles the library's IPC provider; the IPC-primary relay wiring is the
   follow-up, and **GREENGRASS** deployment validation rides it (HOST is proven by the e2e and
   KUBERNETES by the boundary-bridge deploy of `deploy/site-broker/k8s/`).
-- The standard `-c`/`--platform`/`--transport` CLI contract (today the minimal `--config`/`--thing`
-  CLI synthesizes the standard argv internally) and template substitution across the whole
-  `instances[]` entry.
+- Template substitution across the whole `instances[]` entry.
 - A Rust-only library affordance exposing the runtime's raw `MessagingProvider` so the relay can
   share the runtime's device-bus connection (see "How it connects").
 - Docs-site sync of this component's docs into the edgecommons website.

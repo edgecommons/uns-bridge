@@ -214,9 +214,15 @@ impl Bridge {
     fn spawn(config: &Path, log: &Path) -> Bridge {
         let log_file = std::fs::File::create(log).expect("creating the bridge log file");
         let child = Command::new(env!("CARGO_BIN_EXE_uns-bridge"))
-            .arg("--config")
+            .arg("--platform")
+            .arg("HOST")
+            .arg("--transport")
+            .arg("MQTT")
             .arg(config)
-            .arg("--thing")
+            .arg("-c")
+            .arg("FILE")
+            .arg(config)
+            .arg("-t")
             .arg(DEVICE)
             .stdout(Stdio::from(
                 log_file.try_clone().expect("cloning the log handle"),

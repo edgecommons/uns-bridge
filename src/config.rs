@@ -16,6 +16,7 @@
 //! P3-3 (the `reply_to` rewrite, [`crate::reply`]).
 
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::path::Path;
 use std::time::Duration;
 
@@ -267,7 +268,14 @@ impl Default for QueueConfig {
 }
 
 impl BridgeConfig {
+    /// Parse the bridge config from an already-loaded effective EdgeCommons config.
+    pub fn from_value(value: Value) -> anyhow::Result<BridgeConfig> {
+        Self::reject_configured_lwt(&value)?;
+        serde_json::from_value(value).context("parsing bridge config")
+    }
+
     /// Load and parse the bridge config from a JSON file.
+    #[cfg(test)]
     pub async fn load(path: impl AsRef<Path>) -> anyhow::Result<BridgeConfig> {
         let path = path.as_ref();
         let bytes = tokio::fs::read(path)
@@ -401,6 +409,13 @@ mod tests {
         assert_eq!(data.max_rate_per_sec, Some(200));
         assert_eq!(data.burst, Some(400));
         assert!(data.buffer_while_disconnected.is_none());
+    }
+
+    #[test]
+    fn parses_from_effective_config_value() {
+        let value: Value = serde_json::from_str(FULL).unwrap();
+        let cfg = BridgeConfig::from_value(value).unwrap();
+        assert_eq!(cfg.site_instance().unwrap().id, "site");
     }
 
     #[test]
