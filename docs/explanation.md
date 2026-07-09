@@ -185,8 +185,7 @@ publisher announces its redacted effective config; and every **30 s** a task sna
 emits them through `gg.metrics()` on the UNS `metric` class (`ecv1/{device}/uns-bridge/main/metric/<name>`).
 All of it matches the uplink filters and is relayed by the bridge itself. Counters emit **interval deltas**
 (so they sum correctly in CloudWatch/EMF); two gauges — `relay_pending_replies` and `site_connected` — emit
-current values. See [reference/messaging-interface.md](reference/messaging-interface.md#metrics) for the full
-table.
+current values. See [reference/metrics.md](reference/metrics.md) for the full table.
 
 The site Last-Will is deliberately private to the bridge-console contract. At startup the bridge derives its
 real state topic from the resolved runtime identity (`gg.uns().topic(State)`) and registers a protobuf

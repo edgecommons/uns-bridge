@@ -27,6 +27,7 @@ detection.
 - **"I'm new here."** → [Tutorial](tutorial.md).
 - **"What config option does X?"** → [Reference — Configuration](reference/configuration.md).
 - **"Which classes cross the bridge, and on which topics?"** → [Reference — Messaging Interface](reference/messaging-interface.md).
+- **"What does this metric mean?"** → [Reference — Metrics](reference/metrics.md).
 - **"What exactly is a hop tag / the `_relay` array?"** → [Reference — Data Types](reference/data-types.md).
 - **"Why three connections? Why isn't `cmd` uplinked?"** → [Explanation](explanation.md).
 - **"Show me a real, complete config."** → [Sample configurations](sample-configurations.md).

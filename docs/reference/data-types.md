@@ -150,7 +150,7 @@ whole device flip to UNREACHABLE on an abrupt bridge/device death — no bespoke
 
 ## Metric value shapes
 
-The relay counters are emitted as edgecommons metrics (see [messaging-interface.md](messaging-interface.md#metrics)).
+The relay counters are emitted as edgecommons metrics (see [metrics.md](metrics.md)).
 Two value kinds:
 
 | Kind | Emitted value | Examples |

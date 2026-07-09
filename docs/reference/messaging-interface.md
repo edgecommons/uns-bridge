@@ -108,40 +108,9 @@ never touched — correlation survives inside the relayed envelope.
 
 Emitted every 30 s through `gg.metrics()`; with `metricEmission.target: messaging` they publish on the UNS
 `metric` class (`ecv1/{device}/uns-bridge/main/metric/<name>`) and ride the bridge's own relay to the site.
-Counters are **interval deltas**; gauges are **current** values. Dimensions come from the runtime
-(thing/component name).
-
-### Per-class counters (one measure per class: `state cfg evt metric data log app`)
-
-| Metric | Meaning |
-|--------|---------|
-| `relay_uplinked` | messages relayed device → site, per class |
-| `relay_dropped_disabled` | uplink drops: the class is disabled |
-| `relay_dropped_rate` | uplink drops: over the class's token-bucket rate cap |
-| `relay_dropped_disconnected` | uplink drops: site link down / publish failed and the class doesn't buffer |
-
-### Scalar counters (single `count` measure)
-
-| Metric | Meaning |
-|--------|---------|
-| `relay_downlinked` | commands relayed site → device |
-| `relay_loop_dropped` | hop-tag drops (own echo + maxHops) |
-| `relay_routed_dropped` | class-routing / device-pinning / non-UNS-topic drops |
-| `relay_malformed_dropped` | payloads that cannot decode as valid edgecommons protobuf envelopes |
-| `relay_publish_failed` | forward decisions whose republish failed at the transport (incl. a downlink cmd not relayed because its reply-topic subscribe failed) |
-| `relay_reply_relayed` | replies relayed device → site through the correlation map |
-| `relay_reply_expired` | correlation entries torn down unresolved (TTL expiry + evict-oldest) |
-| `relay_reply_stray` | replies arriving with no live correlation entry (dropped) |
-| `relay_evt_buffered` | `evt` pushed into the disconnect replay buffer |
-| `relay_evt_buffer_dropped` | `evt` evicted from a full replay buffer (drop-oldest) |
-| `relay_evt_replayed` | buffered `evt` replayed to the site broker after reconnect |
-
-### Gauges (current value)
-
-| Metric | Measure | Meaning |
-|--------|---------|---------|
-| `relay_pending_replies` | `count` | in-flight correlation entries |
-| `site_connected` | `connected` | site link state (`1` up / `0` down; unit `None`) |
+Counters are **interval deltas**; gauges are **current** values. For every metric's measures, units,
+and diagnostic purpose, see
+[Reference - Metrics](metrics.md).
 
 ## Reserved classes and the guard
 

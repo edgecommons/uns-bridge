@@ -223,7 +223,7 @@ test is
   `relay_loop_dropped` for loop protection firing, `relay_reply_relayed` / `relay_reply_expired` for the
   reply proxy, `relay_evt_buffered` / `relay_evt_replayed` for disconnect handling, and the gauges
   `relay_pending_replies` and `site_connected` for live state. Full table:
-  [reference/messaging-interface.md](reference/messaging-interface.md#metrics).
+  [reference/metrics.md](reference/metrics.md).
 - **State keepalive** — the bridge's own `state` on `ecv1/{device}/uns-bridge/main/state` every ~5 s; the
   site LWT flips it to `UNREACHABLE` on an abrupt death.
 - **Logs** — startup logs the resolved identity, hop id, filter counts, and the active uplink policy
