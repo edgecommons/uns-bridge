@@ -407,7 +407,7 @@ mod tests {
         use edgecommons::config::model::Config;
         use edgecommons::uns::{Uns, UnsClass};
 
-        const EXPECTED: &str = "ecv1/gw-01/uns-bridge/main/state";
+        const EXPECTED: &str = "ecv1/gw-01/uns-bridge/state";
 
         let raw: serde_json::Value =
             serde_json::from_str(include_str!("../test-configs/config.json")).unwrap();

@@ -607,7 +607,7 @@ mod tests {
                  "component": { "instances": [
                    { "id": "site",
                      "siteBroker": { "host": "s", "port": 1884, "clientId": "cs" },
-                     "lwt": { "topic": "ecv1/gw-01/uns-bridge/main/state" } }
+                     "lwt": { "topic": "ecv1/gw-01/uns-bridge/state" } }
                  ] } }"#,
         )
         .unwrap();

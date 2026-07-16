@@ -7,7 +7,7 @@
 //! Since P3-4b the bridge is a **proper edgecommons component** (§2.8): a real
 //! `EdgeCommons` runtime — built from the same config file — owns the bridge's own
 //! observability: the resolved identity, the automatic heartbeat `state` keepalive
-//! on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg`
+//! on `ecv1/{device}/uns-bridge/state`, the effective-(redacted-)config `cfg`
 //! publisher, and `gg.metrics()` (the relay counters emit through it periodically,
 //! `metricEmission.target = "messaging"` in the shipped config). All of that
 //! traffic matches the bridge's own uplink filters, so it **rides its own relay**
@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         hop_id = %engine.hop_id(),
         max_hops = site_entry.effective_max_hops(),
         uplink_filters = engine.uplink_subscriptions().len(),
-        downlink_filter = %engine.downlink_filter(),
+        downlink_filters = engine.downlink_filters().len(),
         reply_ttl_secs = site_entry.reply.ttl_secs,
         reply_max_pending = site_entry.reply.max_pending,
         "uns-bridge starting"
