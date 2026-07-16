@@ -160,7 +160,7 @@ impl RelayEngine {
         let downlink_filter = uns.filter(UnsClass::Cmd, &UnsScope::device(device.clone()))?;
 
         // The §2.5 reconnect-rehydration broadcast topics
-        // (`ecv1/{device}/_bcast/main/cmd/republish-*`) — built through the
+        // (`ecv1/{device}/_bcast/cmd/republish-*`) — built through the
         // library like every other topic: `_bcast` is a valid (reserved-token)
         // component position, `cmd` is an open class.
         let bcast = MessageIdentity::new(
@@ -214,7 +214,7 @@ impl RelayEngine {
 
     /// The two device-bus `_bcast` topics published at the site-reconnect rising
     /// edge (§2.5 / DESIGN-uns §9.3 layer 2), in [`REHYDRATION_CMDS`] order:
-    /// `ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg`.
+    /// `ecv1/{device}/_bcast/cmd/republish-state` and `…/republish-cfg`.
     pub fn rehydration_topics(&self) -> &[String; 2] {
         &self.rehydration_topics
     }
@@ -226,10 +226,17 @@ impl RelayEngine {
         //    already constrain what arrives; this re-check keeps the decision
         //    surface self-contained (and covers a misconfigured broker-side ACL).
         let segments: Vec<&str> = topic.split('/').collect();
-        if segments.len() < 5 || segments[0] != Uns::ROOT {
+        if segments.len() < 4 || segments[0] != Uns::ROOT {
             return RelayDecision::Drop(DropReason::NotUnsTopic);
         }
-        let Some(class) = UnsClass::from_token(segments[4]) else {
+        // D-U28: the instance token is optional, so the class sits either directly after
+        // {component} (component scope: ecv1/{device}/{component}/{class}, index 3) or after an
+        // instance token (instance scope: ecv1/{device}/{component}/{instance}/{class}, index 4).
+        // Locate it by the class-token set, never a fixed position — an instance is never a
+        // reserved class token, so `segments[3]` being a class token unambiguously means the
+        // class is there (component scope).
+        let class_index = if UnsClass::from_token(segments[3]).is_some() { 3 } else { 4 };
+        let Some(class) = segments.get(class_index).and_then(|t| UnsClass::from_token(t)) else {
             return RelayDecision::Drop(DropReason::NotUnsTopic);
         };
         match direction {
@@ -408,8 +415,8 @@ mod tests {
         assert_eq!(
             engine().rehydration_topics(),
             &[
-                "ecv1/gw-01/_bcast/main/cmd/republish-state".to_string(),
-                "ecv1/gw-01/_bcast/main/cmd/republish-cfg".to_string(),
+                "ecv1/gw-01/_bcast/cmd/republish-state".to_string(),
+                "ecv1/gw-01/_bcast/cmd/republish-cfg".to_string(),
             ]
         );
     }
@@ -463,6 +470,35 @@ mod tests {
     }
 
     #[test]
+    fn relays_component_scope_topics_d_u28() {
+        // D-U28: a component-scope topic omits the instance token, so the class sits directly
+        // after {component} (index 3: ecv1/{device}/{component}/{class}). The old fixed index-4
+        // parse required >= 5 segments and dropped every 4-segment component-scope topic as
+        // NotUnsTopic. Both scopes must now route.
+        let e = engine();
+        // uplink, component scope (4 segments, class at index 3)
+        assert!(matches!(
+            e.decide(Direction::Uplink, "ecv1/gw-01/opcua-adapter/state", &envelope(&[])),
+            RelayDecision::Forward(_)
+        ));
+        // uplink, instance scope still works (main is now an ordinary instance token)
+        assert!(matches!(
+            e.decide(Direction::Uplink, "ecv1/gw-01/opcua-adapter/inst-7/state", &envelope(&[])),
+            RelayDecision::Forward(_)
+        ));
+        // downlink, component-scope command to own device
+        assert!(matches!(
+            e.decide(Direction::Downlink, "ecv1/gw-01/opcua-adapter/cmd/reload-config", &envelope(&[])),
+            RelayDecision::Forward(_)
+        ));
+        // downlink, component-scope broadcast rehydration
+        assert!(matches!(
+            e.decide(Direction::Downlink, "ecv1/gw-01/_bcast/cmd/republish-state", &envelope(&[])),
+            RelayDecision::Forward(_)
+        ));
+    }
+
+    #[test]
     fn downlink_relays_only_own_device_cmd() {
         let e = engine();
         assert!(matches!(
@@ -477,7 +513,7 @@ mod tests {
         assert!(matches!(
             e.decide(
                 Direction::Downlink,
-                "ecv1/gw-01/_bcast/main/cmd/republish-state",
+                "ecv1/gw-01/_bcast/cmd/republish-state",
                 &envelope(&[])
             ),
             RelayDecision::Forward(_)

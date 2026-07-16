@@ -7,7 +7,7 @@
 //! Since P3-4b the bridge is a **proper edgecommons component** (§2.8): a real
 //! `EdgeCommons` runtime — built from the same config file — owns the bridge's own
 //! observability: the resolved identity, the automatic heartbeat `state` keepalive
-//! on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg`
+//! on `ecv1/{device}/uns-bridge/state`, the effective-(redacted-)config `cfg`
 //! publisher, and `gg.metrics()` (the relay counters emit through it periodically,
 //! `metricEmission.target = "messaging"` in the shipped config). All of that
 //! traffic matches the bridge's own uplink filters, so it **rides its own relay**

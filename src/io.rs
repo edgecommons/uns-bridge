@@ -30,7 +30,7 @@
 //! task polls `site.connected()` and drains the buffer, strictly in order,
 //! whenever the link is up and something is queued; on the **rising edge**
 //! (site reconnect) it first publishes the two §2.5 / DESIGN-uns §9.3 (layer 2)
-//! rehydration broadcasts `ecv1/{device}/_bcast/main/cmd/republish-{state,cfg}`
+//! rehydration broadcasts `ecv1/{device}/_bcast/cmd/republish-{state,cfg}`
 //! on the DEVICE bus — best-effort, before the `evt` replay — so the site view
 //! rehydrates `state`/`cfg` without retain. **Bridge side only**: the device-side
 //! listener that answers the broadcast is a separate 4-language edgecommons library
@@ -40,7 +40,7 @@
 //! snapshots the [`RelayCounters`] and emits them as `metric`s through
 //! `gg.metrics()` (the pure mapping lives in [`crate::observability`]); the
 //! messaging metric target then publishes them on
-//! `ecv1/{device}/uns-bridge/main/metric/<name>` — which matches the bridge's own
+//! `ecv1/{device}/uns-bridge/metric/<name>` — which matches the bridge's own
 //! uplink filters, so the counters ride the bridge's own relay to the site.
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -471,7 +471,7 @@ impl UplinkGovernor {
 /// metric emission (tests; the counters stay readable in-process either way).
 pub struct ObservabilityHook {
     /// `gg.metrics()` — the emission path (`metricEmission.target`, `messaging`
-    /// in the shipped config → `ecv1/{device}/uns-bridge/main/metric/<name>`).
+    /// in the shipped config → `ecv1/{device}/uns-bridge/metric/<name>`).
     pub metrics: Arc<dyn MetricService>,
     /// `gg.config()` — supplies namespace + thingName/componentName dimensions.
     pub config: Arc<Config>,
@@ -707,7 +707,7 @@ impl RelayIo {
         // METRIC_EMIT_INTERVAL and emit them through gg.metrics() — counters as
         // interval deltas, gauges as current values (the pure mapping + names
         // live in crate::observability). The messaging metric target puts them
-        // on ecv1/{device}/uns-bridge/main/metric/<name>, where they match the
+        // on ecv1/{device}/uns-bridge/metric/<name>, where they match the
         // bridge's own uplink filters and ride its own relay to the site (§2.8).
         if let Some(hook) = observability {
             let counters = Arc::clone(&counters);
@@ -1947,8 +1947,8 @@ mod tests {
 
     // ---- the §2.5 / §9.3-layer-2 reconnect rehydration broadcast (P3-4b) ----
 
-    const BCAST_STATE: &str = "ecv1/gw-01/_bcast/main/cmd/republish-state";
-    const BCAST_CFG: &str = "ecv1/gw-01/_bcast/main/cmd/republish-cfg";
+    const BCAST_STATE: &str = "ecv1/gw-01/_bcast/cmd/republish-state";
+    const BCAST_CFG: &str = "ecv1/gw-01/_bcast/cmd/republish-cfg";
 
     #[tokio::test]
     async fn reconnect_publishes_the_two_rehydration_bcasts_then_replays_evt() {
