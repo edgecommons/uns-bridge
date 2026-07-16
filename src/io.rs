@@ -641,25 +641,27 @@ impl RelayIo {
 
         // DOWNLINK pump: site broker → device bus (own-device cmd only), running
         // each forwardable cmd through the §2.4 reply proxy.
-        let downlink = engine.downlink_filter().to_string();
-        let sub = site
-            .subscribe(
-                &downlink,
-                Destination::Local,
-                Qos::AtLeastOnce,
-                queue.default_depth,
-            )
-            .await?;
-        tracing::info!(filter = %downlink, "downlink subscription established (site broker)");
-        tasks.push(tokio::spawn(pump(
-            sub,
-            Arc::clone(&engine),
-            Arc::clone(&counters),
-            PumpRole::Downlink {
-                proxy: Arc::clone(&reply_proxy),
-                device_bus: Arc::clone(&primary),
-            },
-        )));
+        // D-U28: subscribe both downlink scopes (instance + component), one pump each.
+        for downlink in engine.downlink_filters() {
+            let sub = site
+                .subscribe(
+                    downlink,
+                    Destination::Local,
+                    Qos::AtLeastOnce,
+                    queue.default_depth,
+                )
+                .await?;
+            tracing::info!(filter = %downlink, "downlink subscription established (site broker)");
+            tasks.push(tokio::spawn(pump(
+                sub,
+                Arc::clone(&engine),
+                Arc::clone(&counters),
+                PumpRole::Downlink {
+                    proxy: Arc::clone(&reply_proxy),
+                    device_bus: Arc::clone(&primary),
+                },
+            )));
+        }
 
         // The §2.5 connectivity watcher: on the RISING EDGE of `site.connected()`
         // (site reconnect) it publishes the two §9.3-layer-2 rehydration
@@ -818,9 +820,10 @@ impl RelayIo {
                 tracing::warn!(filter, error = %e, "uplink unsubscribe failed");
             }
         }
-        let downlink = self.engine.downlink_filter();
-        if let Err(e) = self.site.unsubscribe(downlink, Destination::Local).await {
-            tracing::warn!(filter = %downlink, error = %e, "downlink unsubscribe failed");
+        for downlink in self.engine.downlink_filters() {
+            if let Err(e) = self.site.unsubscribe(downlink, Destination::Local).await {
+                tracing::warn!(filter = %downlink, error = %e, "downlink unsubscribe failed");
+            }
         }
         let pending = self.reply_proxy.correlator().drain(); // lock released here
         for topic in pending {
@@ -1270,15 +1273,18 @@ mod tests {
         assert_eq!(
             dev_unsubs,
             vec![
-                "ecv1/+/+/+/state",
-                "ecv1/+/+/+/cfg",
-                "ecv1/+/+/+/evt/#",
-                "ecv1/+/+/+/metric/#",
-                "ecv1/+/+/+/data/#",
-                "ecv1/+/+/+/log/#",
+                "ecv1/+/+/+/state", "ecv1/+/+/state",
+                "ecv1/+/+/+/cfg", "ecv1/+/+/cfg",
+                "ecv1/+/+/+/evt/#", "ecv1/+/+/evt/#",
+                "ecv1/+/+/+/metric/#", "ecv1/+/+/metric/#",
+                "ecv1/+/+/+/data/#", "ecv1/+/+/data/#",
+                "ecv1/+/+/+/log/#", "ecv1/+/+/log/#",
             ]
         );
-        assert_eq!(site.unsubscribed(), vec!["ecv1/gw-01/+/+/cmd/#"]);
+        assert_eq!(
+            site.unsubscribed(),
+            vec!["ecv1/gw-01/+/+/cmd/#", "ecv1/gw-01/+/cmd/#"]
+        );
     }
 
     // ---- the §2.4 reply proxy (P3-3) ----

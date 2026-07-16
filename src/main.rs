@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
         hop_id = %engine.hop_id(),
         max_hops = site_entry.effective_max_hops(),
         uplink_filters = engine.uplink_subscriptions().len(),
-        downlink_filter = %engine.downlink_filter(),
+        downlink_filters = engine.downlink_filters().len(),
         reply_ttl_secs = site_entry.reply.ttl_secs,
         reply_max_pending = site_entry.reply.max_pending,
         "uns-bridge starting"

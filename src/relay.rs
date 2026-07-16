@@ -111,7 +111,7 @@ pub struct RelayEngine {
     max_hops: usize,
     app_enabled: bool,
     uplink_filters: Vec<(UnsClass, String)>,
-    downlink_filter: String,
+    downlink_filters: Vec<String>,
     rehydration_topics: [String; 2],
 }
 
@@ -150,14 +150,26 @@ impl RelayEngine {
         let uns = Uns::new(identity, false);
 
         let all = UnsScope::all();
-        let mut uplink_filters = Vec::with_capacity(UPLINK_CLASSES.len() + 1);
+        // D-U28: the instance token is optional, so a fleet relay must subscribe to BOTH the
+        // instance-scope wildcard (`ecv1/+/+/+/{class}`) AND the component-scope wildcard
+        // (`ecv1/+/+/{class}`) for every class — otherwise it silently drops all component-scope
+        // traffic. The two filters are disjoint (an instance is never a class token), so a
+        // delivery is never double-counted.
+        let mut uplink_filters = Vec::with_capacity((UPLINK_CLASSES.len() + 1) * 2);
         for cls in UPLINK_CLASSES {
-            uplink_filters.push((cls, uns.filter(cls, &all)?));
+            uplink_filters.push((cls, uns.filter_scoped(cls, &all, true)?));
+            uplink_filters.push((cls, uns.filter_scoped(cls, &all, false)?));
         }
         if app_enabled {
-            uplink_filters.push((UnsClass::App, uns.filter(UnsClass::App, &all)?));
+            uplink_filters.push((UnsClass::App, uns.filter_scoped(UnsClass::App, &all, true)?));
+            uplink_filters.push((UnsClass::App, uns.filter_scoped(UnsClass::App, &all, false)?));
         }
-        let downlink_filter = uns.filter(UnsClass::Cmd, &UnsScope::device(device.clone()))?;
+        // Downlink `cmd`, pinned to this bridge's own device, at both scopes.
+        let device_scope = UnsScope::device(device.clone());
+        let downlink_filters = vec![
+            uns.filter_scoped(UnsClass::Cmd, &device_scope, true)?,
+            uns.filter_scoped(UnsClass::Cmd, &device_scope, false)?,
+        ];
 
         // The §2.5 reconnect-rehydration broadcast topics
         // (`ecv1/{device}/_bcast/cmd/republish-*`) — built through the
@@ -183,7 +195,7 @@ impl RelayEngine {
             max_hops,
             app_enabled,
             uplink_filters,
-            downlink_filter,
+            downlink_filters,
             rehydration_topics,
         })
     }
@@ -206,10 +218,11 @@ impl RelayEngine {
         &self.uplink_filters
     }
 
-    /// The downlink subscription filter, pinned to this bridge's own device:
-    /// `ecv1/{device}/+/+/cmd/#` (the `+` component position also covers `_bcast`).
-    pub fn downlink_filter(&self) -> &str {
-        &self.downlink_filter
+    /// The downlink subscription filters, pinned to this bridge's own device, at both D-U28
+    /// scopes: `ecv1/{device}/+/+/cmd/#` (instance) and `ecv1/{device}/+/cmd/#` (component). The
+    /// `+` component position also covers `_bcast`.
+    pub fn downlink_filters(&self) -> &[String] {
+        &self.downlink_filters
     }
 
     /// The two device-bus `_bcast` topics published at the site-reconnect rising
@@ -358,41 +371,46 @@ mod tests {
     // ---- filter construction (built via the library, §2.2) ----
 
     #[test]
-    fn uplink_filters_are_the_six_class_wildcards() {
+    fn uplink_filters_cover_both_d_u28_scopes_per_class() {
         let e = engine();
         let filters: Vec<&str> = e
             .uplink_subscriptions()
             .iter()
             .map(|(_, f)| f.as_str())
             .collect();
+        // D-U28: each class subscribes at BOTH the instance scope (`ecv1/+/+/+/{class}`) and the
+        // component scope (`ecv1/+/+/{class}`) — otherwise component-scope traffic is dropped.
         assert_eq!(
             filters,
             vec![
-                "ecv1/+/+/+/state",
-                "ecv1/+/+/+/cfg",
-                "ecv1/+/+/+/evt/#",
-                "ecv1/+/+/+/metric/#",
-                "ecv1/+/+/+/data/#",
-                "ecv1/+/+/+/log/#",
+                "ecv1/+/+/+/state", "ecv1/+/+/state",
+                "ecv1/+/+/+/cfg", "ecv1/+/+/cfg",
+                "ecv1/+/+/+/evt/#", "ecv1/+/+/evt/#",
+                "ecv1/+/+/+/metric/#", "ecv1/+/+/metric/#",
+                "ecv1/+/+/+/data/#", "ecv1/+/+/data/#",
+                "ecv1/+/+/+/log/#", "ecv1/+/+/log/#",
             ]
         );
     }
 
     #[test]
-    fn app_opt_in_adds_the_seventh_filter() {
+    fn app_opt_in_adds_the_seventh_class_at_both_scopes() {
         let e = RelayEngine::new(DEVICE, DEFAULT_MAX_HOPS, true).unwrap();
         let filters: Vec<&str> = e
             .uplink_subscriptions()
             .iter()
             .map(|(_, f)| f.as_str())
             .collect();
-        assert_eq!(filters.len(), 7);
-        assert_eq!(filters[6], "ecv1/+/+/+/app/#");
+        assert_eq!(filters.len(), 14); // 7 classes x 2 scopes
+        assert_eq!(&filters[12..], &["ecv1/+/+/+/app/#", "ecv1/+/+/app/#"]);
     }
 
     #[test]
-    fn downlink_filter_is_pinned_to_own_device() {
-        assert_eq!(engine().downlink_filter(), "ecv1/gw-01/+/+/cmd/#");
+    fn downlink_filters_are_pinned_to_own_device_at_both_scopes() {
+        assert_eq!(
+            engine().downlink_filters(),
+            &["ecv1/gw-01/+/+/cmd/#".to_string(), "ecv1/gw-01/+/cmd/#".to_string()]
+        );
     }
 
     #[test]
