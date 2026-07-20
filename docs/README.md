@@ -20,7 +20,7 @@ detection.
 | **[Tutorial](tutorial.md)** | learn by doing — bring a bridge up between two brokers and watch traffic cross, end to end |
 | **[How-to guides](how-to-guides.md)** | accomplish a task — declare the site broker, tune per-class policy, proxy request/reply, add TLS, deploy |
 | **[Reference](reference/)** | look up an exact option, topic, filter, envelope field, or metric |
-| **[Explanation](explanation.md)** | understand how it works and why — the three connections, the relay matrix, loop protection, the two disconnect stories |
+| **[Explanation](explanation.md)** | understand how it works and why — the two connections, the relay matrix, loop protection, the two disconnect stories |
 
 ## Quick routing
 
@@ -29,7 +29,7 @@ detection.
 - **"Which classes cross the bridge, and on which topics?"** → [Reference — Messaging Interface](reference/messaging-interface.md).
 - **"What does this metric mean?"** → [Reference — Metrics](reference/metrics.md).
 - **"What exactly is a hop tag / the `_relay` array?"** → [Reference — Data Types](reference/data-types.md).
-- **"Why three connections? Why isn't `cmd` uplinked?"** → [Explanation](explanation.md).
+- **"Why two connections? Why isn't `cmd` uplinked?"** → [Explanation](explanation.md).
 - **"Show me a real, complete config."** → [Sample configurations](sample-configurations.md).
 
 ## The one-sentence model
@@ -53,6 +53,6 @@ They do not cover modifying the bridge's own source (for that, the module-level 
 
 - The binary runs on **HOST** as an MQTT↔MQTT pair (a device broker and a site broker) and on
   **KUBERNETES** as a boundary-bridge deployment of that same binary. Both are the same code.
-- On **Greengrass**, the bridge runs in its HOST/MQTT shape against a device-local MQTT broker; a
-  Nucleus-IPC-primary device bus (with the site half over MQTT) is not supported. See
+- On **Greengrass**, the device bus is the Nucleus IPC pubsub and the site half is MQTT; the relay shares
+  the runtime's IPC provider (built with the `greengrass` cargo feature — a Linux C-FFI IPC provider). See
   [Explanation → Platforms](explanation.md#platforms-where-a-bridge-runs).

@@ -1,9 +1,16 @@
 //! # config — the bridge's own component config (§2.7 shape)
 //!
-//! **One-liner purpose**: Parse the bridge's config file: the standard `messaging`
-//! section (the PRIMARY, device-bus connection) plus the `component.instances[]`
-//! entry declaring the SITE broker — the bridge's **external system**, exactly how
-//! an adapter declares its OPC UA endpoints.
+//! **One-liner purpose**: Parse the bridge's config file for the
+//! `component.instances[]` entry declaring the SITE broker — the bridge's
+//! **external system**, exactly how an adapter declares its OPC UA endpoints.
+//!
+//! The device-bus (PRIMARY) connection is **not** parsed here: the relay shares the
+//! `EdgeCommons` runtime's own device-bus provider (`gg.raw_device_provider()`),
+//! whichever transport the platform resolved — IPC on GREENGRASS, MQTT on HOST — so
+//! the bridge no longer holds a separate device-bus config. On HOST the runtime
+//! still reads its `messaging` section straight from the `--transport MQTT <path>`
+//! file; a `messaging` section in the bridge config is simply ignored here, and on
+//! GREENGRASS (IPC, `GG_CONFIG`) there is none.
 //!
 //! The site entry reuses the library's existing `MessagingConfig`/`mqttBroker`
 //! shape for the broker endpoint ([`BrokerConfig`]). The site Last-Will is not
@@ -37,13 +44,13 @@ pub const DEFAULT_DATA_QUEUE: usize = 512;
 /// Default bounded client-side queue for every other class subscription (§2.2).
 pub const DEFAULT_QUEUE: usize = 64;
 
-/// The bridge's top-level config file (unknown sections — `hierarchy`, `identity`,
-/// `heartbeat`, … — are tolerated; the full facade integration is a follow-up).
+/// The bridge's top-level config file (unknown sections — `messaging`, `hierarchy`,
+/// `identity`, `heartbeat`, … — are tolerated; the full facade integration is a
+/// follow-up). The device-bus `messaging` section belongs to the runtime (it reads
+/// it via `--transport MQTT <path>` on HOST); the relay shares the runtime's
+/// provider, so this struct only needs the site-broker entry.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BridgeConfig {
-    /// PRIMARY connection: the device-local bus. The standard edgecommons
-    /// `messaging` shape (doubles as the `--transport MQTT <file>` payload).
-    pub messaging: Messaging,
     /// The component section carrying the site-broker instance entry.
     pub component: ComponentSection,
 }
@@ -311,24 +318,6 @@ impl BridgeConfig {
         Ok(())
     }
 
-    /// The relay's own raw device-bus connection config: the standard `messaging`
-    /// section with `-relay` appended to every client id.
-    ///
-    /// Since P3-4b the bridge holds **two** device-bus connections (README
-    /// "Connections"): the EdgeCommons runtime builds the observability connection
-    /// from the config **file** (this same `messaging` section — it doubles as the
-    /// `--transport MQTT` payload), and the relay holds this second raw one. The
-    /// suffix keeps the two MQTT client ids distinct (a shared id makes the broker
-    /// bounce the clients in a session-takeover loop).
-    pub fn relay_primary_messaging(&self) -> MessagingConfig {
-        let mut messaging = self.messaging.clone();
-        messaging.local.client_id = format!("{}-relay", messaging.local.client_id);
-        if let Some(northbound) = messaging.northbound.as_mut() {
-            northbound.client_id = format!("{}-relay", northbound.client_id);
-        }
-        MessagingConfig { messaging }
-    }
-
     /// The site-broker instance entry: the entry with id [`SITE_INSTANCE_ID`], or —
     /// when none carries that id — the single entry declaring a `siteBroker`.
     ///
@@ -485,15 +474,20 @@ mod tests {
     }
 
     #[test]
-    fn relay_primary_messaging_wraps_the_section_with_a_distinct_client_id() {
-        let cfg: BridgeConfig = serde_json::from_str(FULL).unwrap();
-        let mc = cfg.relay_primary_messaging();
-        assert_eq!(mc.messaging.local.resolved_host().unwrap(), "localhost");
-        assert_eq!(mc.messaging.local.port, 1883);
-        // The EdgeCommons runtime connects with the CONFIGURED id (from the file);
-        // the relay's raw connection must never collide with it.
-        assert_eq!(mc.messaging.local.client_id, "uns-bridge-local-relay");
-        assert!(mc.messaging.northbound.is_none());
+    fn a_messaging_section_is_tolerated_but_not_required() {
+        // HOST configs still carry a `messaging` section (the runtime reads it via
+        // --transport MQTT <path>); the bridge config parser ignores it. A config
+        // WITHOUT one (GREENGRASS/IPC, GG_CONFIG) parses just the same.
+        let with_messaging: BridgeConfig = serde_json::from_str(FULL).unwrap();
+        assert_eq!(with_messaging.site_instance().unwrap().id, "site");
+
+        let without_messaging: BridgeConfig = serde_json::from_str(
+            r#"{ "component": { "instances": [
+                { "id": "site", "siteBroker": { "host": "s", "port": 8883, "clientId": "cs" } }
+            ] } }"#,
+        )
+        .unwrap();
+        assert_eq!(without_messaging.site_instance().unwrap().id, "site");
     }
 
     #[test]

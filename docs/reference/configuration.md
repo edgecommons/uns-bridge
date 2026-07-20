@@ -7,21 +7,24 @@ Every configuration option. For *why* these exist, see [explanation.md](../expla
 
 ## Config source
 
-The bridge reads **one JSON document**. That same file feeds two things: the edgecommons runtime loads it as
-the standard `-c FILE` config (and its top-level `messaging` section doubles as the `--transport MQTT`
+On HOST the bridge reads **one JSON document**. That same file feeds two things: the edgecommons runtime
+loads it as the standard `-c FILE` config (and its top-level `messaging` section is the `--transport MQTT`
 payload — the **device** bus), and the bridge reads its own `component.instances[]` from it (the **site**
-broker). The file is validated against the canonical edgecommons config schema at startup, and
-[`config.schema.json`](../../config.schema.json) at the repo root models this bridge's own
-`component.instances[]` shape for `edgecommons component validate`.
+broker). On GREENGRASS the config comes from the deployment's `GG_CONFIG` (`-c GG_CONFIG`) and the device
+bus is Nucleus IPC, so no `messaging` section is needed. The file is validated against the canonical
+edgecommons config schema at startup, and [`config.schema.json`](../../config.schema.json) at the repo root
+models this bridge's own `component.instances[]` shape for `edgecommons component validate`.
 
-The bridge's CLI is minimal — `--config <file>` and `--thing <name>` — and synthesizes the standard edgecommons
-argv (`--platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`) internally.
+The bridge uses the standard edgecommons CLI (no synthesis): `--platform <P> --transport <T> …
+-c <SOURCE> … -t <thing>`. On HOST: `--platform HOST --transport MQTT <config> -c FILE <config> -t <thing>`.
+On GREENGRASS: `--platform GREENGRASS --transport IPC -c GG_CONFIG -t <thing>`. `-c/--config` takes a source
+keyword first (`FILE`, `GG_CONFIG`, …), not a bare path.
 
 ## Top-level sections
 
 | Section | Required | Purpose |
 |---------|----------|---------|
-| `messaging` | **yes** | The **device-local** bus (the runtime's OBSERVABILITY connection *and*, with `-relay` appended to the client id, the relay's PRIMARY connection). Also the request-deadline knob. |
+| `messaging` | HOST only | The **device-local** MQTT bus the runtime connects to on HOST (via `--transport MQTT <path>`); the relay shares that same connection. Also the request-deadline knob. Not needed on GREENGRASS (the device bus is IPC). |
 | `component` | **yes** | Carries `instances[]`; the entry with a `siteBroker` declares the **site** broker and all relay knobs. |
 | `hierarchy` | optional | UNS enterprise-hierarchy level names; the last level is the device. Absent ⇒ `["device"]`. |
 | `identity` | optional | Values for every hierarchy level except the last (the resolved thing name). Together with `hierarchy` these set the bridge's own `identity`, its real `state` topic, and the private site LWT topic derived from it. |
@@ -38,13 +41,14 @@ own parse are ignored (forward compatibility).
 > never by config. (The Greengrass `recipe.yaml` default config does set `component.name`, but that value is
 > not what names the component.)
 
-## `messaging` (the device bus)
+## `messaging` (the HOST device bus)
 
-The standard edgecommons `messaging` section. Only the fields the bridge relies on are called out here.
+The standard edgecommons `messaging` section, used on HOST (on GREENGRASS the device bus is IPC and this
+section is not needed). Only the fields the bridge relies on are called out here.
 
 | Key | Type | Default | Definition |
 |-----|------|---------|-----------|
-| `local` | object | **required** | The device broker: `host`, `port`, `clientId` (+ `credentials`/TLS as any edgecommons broker). The runtime connects with the configured `clientId`; the relay connects with `clientId + "-relay"`. |
+| `local` | object | required on HOST | The device broker: `host`, `port`, `clientId` (+ `credentials`/TLS as any edgecommons broker). The runtime connects with the configured `clientId`; the relay shares that same connection. |
 | `requestTimeoutSeconds` | number | `30` | The framework request-deadline. **Paired** with `reply.ttlSecs` — see below. |
 
 ## `component.instances[]` — the site entry
@@ -190,8 +194,10 @@ The bundled [`test-configs/config.json`](../../test-configs/config.json) — dev
 
 ## Current limits
 
-- **Greengrass PRIMARY = Nucleus IPC is not supported.** The binary requires the default `standalone`
-  feature; on a Greengrass core it runs in its HOST shape against a device-local MQTT broker.
-- **The CLI is `--config`/`--thing` only** — it synthesizes the standard HOST/MQTT edgecommons argv internally.
+- **The device-bus transport follows the platform.** HOST uses MQTT (the default `standalone` feature);
+  GREENGRASS uses Nucleus IPC (the `greengrass` feature, a Linux-only C-FFI build layered on `standalone`
+  for the site MQTT provider). The relay shares whichever provider the runtime resolved.
+- **The CLI is the standard edgecommons CLI.** `-c/--config` requires a source keyword (`FILE`, `GG_CONFIG`,
+  …); a bare path is not accepted.
 - **The site LWT is private and derived.** `component.instances[site].lwt` is rejected; configure only the
   site broker endpoint and relay policy.

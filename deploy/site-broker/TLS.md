@@ -93,7 +93,7 @@ mosquitto_sub -h localhost -p 8884 -d \
 To run the **bridge itself** against the mTLS listener instead of the plaintext dev port, copy
 `test-configs/config.json` and point `siteBroker` at `localhost:8884` with the
 `deploy/site-broker/tls-certs/client-gw-01.{crt,key}` + `ca.crt` paths (and set the device token to
-`gw-01` to match, e.g. `cargo run -- --config <copy>.json --thing gw-01`).
+`gw-01` to match, e.g. `cargo run -- --platform HOST --transport MQTT <copy>.json -c FILE <copy>.json --thing gw-01`).
 
 ## Prod: a real CA
 

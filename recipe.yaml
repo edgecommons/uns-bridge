@@ -1,7 +1,10 @@
 ---
-# The GREENGRASS deployment of the bridge currently runs the binary in HOST/MQTT shape against a
-# device-local MQTT broker; see DESIGN.md "Still deferred" for the PRIMARY = IPC variant.
-# The site-broker half of a deployment is `deploy/site-broker/`.
+# GREENGRASS deployment: the device bus is the Nucleus IPC pubsub (PRIMARY), the site broker is
+# reached over MQTT (SITE, from `component.instances[].siteBroker` below). The relay shares the
+# runtime's IPC provider, so this recipe needs NO `messaging` section — the transport is IPC.
+# The binary must be built with the `greengrass` cargo feature (Linux-only IPC C-FFI). The
+# site-broker half of a deployment is `deploy/site-broker/`; a HOST/standalone run is documented
+# in README "How it connects" and docs/how-to-guides.md.
 # No `component.name` key here: the canonical edgecommons config schema allows only
 # `global`/`instances` under `component` — the component's full name is supplied by the runtime
 # builder, never by config (see README "Configuration").
@@ -42,10 +45,19 @@ ComponentConfiguration:
             queue:
               data: 512
               default: 64
+    # IPC pubsub authorization for the device bus (the relay's PRIMARY). The bridge must SUBSCRIBE
+    # and PUBLISH across the full local UNS surface: every uplink class wildcard
+    # (ecv1/+/+/+/{state,cfg,evt,metric,data,log}[/#]) plus its own emitted state/cfg/metric, the
+    # own-device cmd downlink (ecv1/{thing}/+/+/cmd/#), the reply-proxy reply topics
+    # (edgecommons/reply-*, non-ecv1), and the reconnect rehydration broadcasts
+    # (ecv1/{thing}/_bcast/cmd/republish-*). Granting "*" (as the reference adapters do) covers all
+    # of these local IPC topics; the durable per-device boundary is enforced at the SITE broker ACL,
+    # not here. No mqttproxy/TokenExchangeService: the site link is a plain external MQTT socket
+    # (its own TLS certs), not Greengrass-brokered IoT Core.
     accessControl:
       aws.greengrass.ipc.pubsub:
         "com.mbreissi.edgecommons.UnsBridge:pubsub:1":
-          policyDescription: Allows the bridge to relay all local UNS topics.
+          policyDescription: Allows the bridge to subscribe and publish all local UNS + reply-proxy topics on IPC.
           operations:
             - "aws.greengrass#PublishToTopic"
             - "aws.greengrass#SubscribeToTopic"
@@ -60,4 +72,7 @@ Manifests:
       Install:
         Script: "chmod +x {artifacts:path}/uns-bridge"
       Run:
-        Script: "{artifacts:path}/uns-bridge --config /greengrass/v2/work/{ComponentFullName}/config.json --thing {iot:thingName}"
+        # Standard edgecommons CLI grammar: --platform/--transport select the runtime axes, and
+        # -c/--config takes a SOURCE keyword first (GG_CONFIG reads this recipe's ComponentConfig).
+        # On GREENGRASS the device bus is IPC (config-free); the site broker comes from GG_CONFIG.
+        Script: "{artifacts:path}/uns-bridge --platform GREENGRASS --transport IPC -c GG_CONFIG -t {iot:thingName}"

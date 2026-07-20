@@ -17,13 +17,14 @@ hop tag for loop protection, and proxies site<->device request/reply across the 
 canonical behavioral spec lives in `DESIGN-uns.md` §9 / `DESIGN-uns-bridge.md` in the `edgecommons`
 core monorepo).
 
-## The three connections
+## The two connections
 
-The bridge holds three live connections: the `EdgeCommons` runtime's own OBSERVABILITY connection on
-the device bus (heartbeat, `cfg` announce, `gg.metrics()`), a second RELAY PRIMARY connection on the
-device bus at the raw provider level (client id suffixed `-relay`), and the SITE connection to the
-site broker (the bridge's external system, declared in its own `component.instances[]` entry). See
-README "How it connects" for why the relay cannot share the runtime's connection today.
+The bridge holds two live connections: the **device bus**, which the `EdgeCommons` runtime owns for its
+own observability (heartbeat, `cfg` announce, `gg.metrics()`) and which the relay SHARES at the raw
+provider level via `gg.raw_device_provider()` — one connection, MQTT on HOST or Nucleus IPC on
+GREENGRASS — and the **SITE** connection to the site broker (always MQTT; the bridge's external system,
+declared in its own `component.instances[]` entry). See README "How it connects" for the shared-provider
+architecture (the relay runs below the reserved-class guard so it can relay reserved classes verbatim).
 
 ## Config location
 
@@ -44,6 +45,13 @@ site broker. `test-configs/config.json` carries a runnable dual-broker example.
   add tests.
 - `bash tests/e2e/run.sh` (`UNS_BRIDGE_E2E=1`, gated `#[ignore]`) is the live dual-EMQX relay proof
   against two real brokers. See `DESIGN.md` "Known validation gap" for its current status.
+- **GREENGRASS builds go through `build.sh`** (`EDGECOMMONS_FEATURES=greengrass`, the gdk
+  `custom_build_command`), not a bare `cargo build --features greengrass`. `build.sh` raises the SDK's
+  `GG_IPC_MAX_STREAMS` to 64 via `CFLAGS`/`TARGET_CFLAGS` because the relay opens ~18 concurrent IPC
+  subscription streams — more than the `aws-greengrass-component-sdk` default of 16, which otherwise
+  crash-loops the component on the Nucleus (NOMEM). A local greengrass dev build that skips `build.sh`
+  must export the same `-DGG_IPC_MAX_STREAMS=64`. See `DESIGN.md` D-UB-7. (The IPC provider is Linux-only
+  C-FFI, so build on Linux/WSL.)
 - `edgecommons component validate` checks this repo's config against `config.schema.json` and warns
   if `Cargo.lock` is not committed (it is — see `DESIGN.md` D-UB-1 for the regeneration discipline).
 

@@ -49,7 +49,7 @@ Bring up two brokers and run it:
 ```bash
 docker run -d --name uns-device-broker -p 1883:1883 emqx/emqx
 docker run -d --name uns-site-broker   -p 1884:1883 emqx/emqx
-uns-bridge --config ./config.json --thing gw-01
+uns-bridge --platform HOST --transport MQTT ./config.json -c FILE ./config.json --thing gw-01
 ```
 
 `config.json`:
@@ -84,8 +84,8 @@ uns-bridge --config ./config.json --thing gw-01
 | Option | Effect |
 |--------|--------|
 | `hierarchy` / `identity` | Place the bridge in the UNS tree. With `--thing gw-01` the device token is `gw-01`; the bridge's own topics are `ecv1/gw-01/uns-bridge/main/...`. |
-| `messaging.local.host/port` | The **device** broker. The runtime connects here for the bridge's own state/cfg/metric; the relay opens a **second** client here (id `uns-bridge-local-relay`) for the provider-level protobuf relay. |
-| `messaging.local.clientId` | The runtime's device-bus client id. The relay derives `<clientId>-relay` so the two never collide (a shared id makes the broker bounce them in a session-takeover loop). |
+| `messaging.local.host/port` | The **device** broker (HOST). The runtime connects here for the bridge's own state/cfg/metric, and the relay shares that same connection (via `gg.raw_device_provider()`) for the provider-level protobuf relay — one client, not two. |
+| `messaging.local.clientId` | The runtime's device-bus client id; the relay reuses the same connection, so there is no second client to collide with. |
 | `messaging.requestTimeoutSeconds` | The framework request deadline. Paired with `reply.ttlSecs` (defaulted here to 60 = 2×30). |
 | `heartbeat` | The bridge's own `state` keepalive on `ecv1/gw-01/uns-bridge/main/state` every 5 s — which matches the uplink `state` filter and rides the relay to the site. |
 | `metricEmission.target: messaging` | Publishes the 30 s relay counters on the UNS `metric` class, so they too ride the relay. |
@@ -348,7 +348,7 @@ spec:
       containers:
         - name: uns-bridge
           image: uns-bridge:latest
-          args: ["--config", "/config/config.json", "--thing", "gw-01"]
+          args: ["--platform", "HOST", "--transport", "MQTT", "/config/config.json", "-c", "FILE", "/config/config.json", "--thing", "gw-01"]
           volumeMounts: [{ name: cfg, mountPath: /config }]
       volumes: [{ name: cfg, configMap: { name: uns-bridge-gw-01 } }]
 ```
@@ -361,10 +361,12 @@ The config's `messaging.local` points at the **on-prem device broker** (reachabl
 
 ## 7. Greengrass
 
-On a Greengrass core the bridge runs in its **HOST/MQTT** shape: the device bus is a device-local MQTT broker
-and the site half is MQTT. The bridge requires the default `standalone` feature; a Nucleus-IPC-primary device
-bus is not supported. The `recipe.yaml`/`gdk-config.json` package it for a Greengrass core against that
-device-local broker (`GG_CONFIG`).
+On a Greengrass core the device bus is the **Nucleus IPC** pubsub and the site half is MQTT. The relay shares
+the runtime's IPC provider, so the same relay serves an IPC device bus. This build needs the `greengrass`
+cargo feature (a Linux-only C-FFI IPC provider, layered on `standalone` for the site MQTT provider). The
+`recipe.yaml`/`gdk-config.json` package it for a core, running it with `--platform GREENGRASS --transport IPC
+-c GG_CONFIG -t {iot:thingName}` and IPC pubsub `accessControl` for the local UNS topics; the config comes
+from the deployment's `GG_CONFIG` (no `messaging` section needed).
 
 The recipe's default config uses `{ThingName}`/`{ComponentFullName}` templates in the site entry, resolved
 Greengrass-side at deployment:
@@ -396,9 +398,9 @@ bridge connects to, not a bridge inside a core.
 
 | Platform | Device bus | Site bus | Notes |
 |----------|-----------|----------|-------|
-| **HOST** | local MQTT | MQTT (TLS in prod) | the default; `uns-bridge --config … --thing …` |
+| **HOST** | local MQTT | MQTT (TLS in prod) | the default; `uns-bridge --platform HOST --transport MQTT <cfg> -c FILE <cfg> --thing …` |
 | **KUBERNETES** (boundary) | on-prem MQTT | in-cluster MQTT | `replicas:1` + `Recreate`; no bridge *inside* the cluster |
-| **GREENGRASS** | device-local MQTT | MQTT | runs in the HOST/MQTT shape on a core; a Nucleus-IPC-primary device bus is not supported |
+| **GREENGRASS** | Nucleus IPC | MQTT | `--platform GREENGRASS --transport IPC -c GG_CONFIG`; needs the `greengrass` feature (Linux C-FFI) |
 
 Pair every bridge with an **ACL-enforcing site broker** (`deploy/site-broker/`) — that ACL, not any code in the
 bridge, is the security boundary.

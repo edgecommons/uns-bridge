@@ -15,11 +15,10 @@
 #
 # NOT YET DEPLOYABLE AS-IS: this repo does not ship a Dockerfile/container image for the bridge
 # itself (P3-5 scope is the site-broker recipes, not the bridge's own containerization) — `image:`
-# below is a placeholder. It also assumes the bridge's standard `-c/--platform/--transport` CLI
-# contract; today the bridge only has the minimal `--config <path> [--thing <name>]` CLI (see
-# ../../README.md "Also follow-ups"), which happens to work fine here (a mounted ConfigMap file
-# path is still just a file path) but does NOT get the CONFIGMAP source's hot-reload-on-..data-swap
-# behavior the way other edgecommons components do — a documented gap, not something this slice fixes.
+# below is a placeholder. The bridge uses the standard `-c/--platform/--transport` CLI contract (see
+# the `args:` on the container below: `-c FILE <mounted-path>`); a mounted ConfigMap file works fine
+# as a `FILE` source, but does NOT get the CONFIGMAP source's hot-reload-on-..data-swap behavior the
+# way other edgecommons components do — a documented gap, not something this slice fixes.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -81,7 +80,8 @@ spec:
         - name: uns-bridge
           image: REPLACE_ME   # ghcr.io/<owner>/uns-bridge:<tag> — no Dockerfile ships in this repo yet
           imagePullPolicy: IfNotPresent
-          args: ["--config", "/etc/edgecommons/config.json"]   # --thing omitted: falls through to EDGECOMMONS_THING_NAME below (D-U1 identity chain)
+          # --thing omitted: falls through to EDGECOMMONS_THING_NAME below (D-U1 identity chain)
+          args: ["--platform", "HOST", "--transport", "MQTT", "/etc/edgecommons/config.json", "-c", "FILE", "/etc/edgecommons/config.json"]
           env:
             - name: EDGECOMMONS_THING_NAME
               valueFrom: { fieldRef: { fieldPath: metadata.name } }

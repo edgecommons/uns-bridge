@@ -182,7 +182,8 @@ Loop protection is automatic (the hop tag), but two knobs and one rule matter:
 (`component.instances[site]`):
 
 ```bash
-uns-bridge --config ./config.json --thing gw-01     # -t falls back to $EDGECOMMONS_THING_NAME
+uns-bridge --platform HOST --transport MQTT ./config.json -c FILE ./config.json --thing gw-01
+# -t falls back to $EDGECOMMONS_THING_NAME
 ```
 
 **Kubernetes (boundary bridge):** deploy the *same* binary as a `replicas: 1` / `strategy: Recreate`
@@ -191,9 +192,10 @@ Deployment between the on-prem device bus and the in-cluster broker. See
 for the in-cluster aggregation broker it bridges onto.
 
 **Greengrass:** the **site broker's** Greengrass recipe is in `deploy/site-broker/greengrass/`. On a
-Greengrass core the bridge runs in its HOST shape against a device-local MQTT broker; a Nucleus-IPC-primary
-device bus is not supported. The bridge's own Greengrass packaging (`recipe.yaml`, `gdk-config.json`) targets
-that HOST shape.
+Greengrass core the bridge's device bus is the Nucleus IPC pubsub and the site half is MQTT; the relay shares
+the runtime's IPC provider. Build with the `greengrass` cargo feature (Linux C-FFI). The bridge's own
+Greengrass packaging (`recipe.yaml`, `gdk-config.json`) runs it with `--platform GREENGRASS --transport IPC
+-c GG_CONFIG -t {iot:thingName}` and IPC pubsub `accessControl` for the local UNS topics.
 
 ---
 

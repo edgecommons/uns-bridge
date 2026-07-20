@@ -14,11 +14,27 @@ COMPONENT_NAME="com.mbreissi.edgecommons.UnsBridge"
 COMPONENT_VERSION="1.0.0"
 BIN_NAME="uns-bridge"
 
-# P3-2 ships the standalone (dual-MQTT) relay; the greengrass (IPC-primary) variant is a
-# documented follow-up.
+# `standalone` = HOST (device + site both MQTT). `greengrass` = device IPC + site MQTT (it builds on
+# `standalone` for the site provider); build it on a Linux toolchain (the IPC provider is C-FFI).
 FEATURES="${EDGECOMMONS_FEATURES:-standalone}"
 TARGET="${EDGECOMMONS_TARGET:-}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+
+# GREENGRASS IPC stream ceiling. The `aws-greengrass-component-sdk` C-FFI compiles with a default
+# GG_IPC_MAX_STREAMS of 16 (an `#ifndef` guard), but the relay opens more concurrent IPC subscription
+# streams than that (~18: the six/seven uplink class wildcards on the device bus, both D-U28 scopes,
+# the downlink cmd scopes, and the per-request reply-proxy topics), so the nucleus rejects the extra
+# streams (NOMEM) and the component crash-loops on start. Raise the ceiling to 64 (comfortable headroom
+# over what the relay uses) for the SDK's `cc` build. Set both `CFLAGS` (native builds) and
+# `TARGET_CFLAGS` (cross builds via EDGECOMMONS_TARGET) so the `cc` crate picks the define up either way;
+# the `#ifndef` makes 64 a supported override. This is baked into the shipped greengrass artifact, so no
+# deploy-time env is needed; ANY local greengrass dev build must go through this script (or export the
+# same define) to get it.
+if [[ " ${FEATURES} " == *greengrass* ]]; then
+  export CFLAGS="${CFLAGS:-} -DGG_IPC_MAX_STREAMS=64"
+  export TARGET_CFLAGS="${TARGET_CFLAGS:-} -DGG_IPC_MAX_STREAMS=64"
+  echo "greengrass build: raising GG_IPC_MAX_STREAMS to 64 (relay opens more IPC streams than the SDK default of 16)"
+fi
 
 echo "Building ${BIN_NAME} (release, features=${FEATURES})${TARGET:+ for ${TARGET}}..."
 if [[ -n "${TARGET}" ]]; then
