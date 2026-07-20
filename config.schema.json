@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docs.edgecommons.mbreissi.com/schemas/uns-bridge/config.schema.json",
+  "title": "uns-bridge component configuration",
+  "description": "The configuration uns-bridge itself understands: the object at `component.global` (unused — the bridge declares no global knobs of its own), with each entry of `component.instances[]` validated against `#/$defs/instance`. uns-bridge is a bridge, not a southbound adapter: it declares exactly ONE instance, conventionally id `\"site\"`, describing the SITE UNS broker — the bridge's external system, exactly how a southbound adapter declares its device endpoints (README \"How it connects\"). See docs/reference/configuration.md for the full narrative and docs/reference/messaging-interface.md for the wire contract this implements. The library envelope (logging, messaging, metricEmission, heartbeat, streaming, credentials, parameters, health, hierarchy, identity, topic, tags) is owned by the canonical edgecommons schema and is deliberately not redeclared here; `messaging` in particular is the bridge's own DEVICE-local bus (its OBSERVABILITY + RELAY PRIMARY connections), not the site broker.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {},
+  "$defs": {
+    "instance": {
+      "title": "uns-bridge site-instance configuration",
+      "description": "One entry of `component.instances[]`. The bridge selects its site entry as the one with `id == \"site\"`, falling back to the sole entry declaring a `siteBroker` when none is named `\"site\"` — two `siteBroker` entries with neither named `\"site\"` is a startup error, as is no qualifying entry at all.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "siteBroker"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "default": "site",
+          "description": "Instance id. `\"site\"` selects this entry explicitly (the documented convention); any other id is accepted only when it is the sole entry declaring `siteBroker`."
+        },
+        "siteBroker": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["host", "port", "clientId"],
+          "description": "The site UNS broker endpoint — the bridge's external system, reusing the library's standard `mqttBroker` shape (identical to any edgecommons broker config, including TLS/credentials). Maps onto the reused core `MqttProvider`'s primary connection; there is deliberately no northbound broker on the site link. `additionalProperties: true` because this is the same open broker shape the canonical schema already validates in full (host/port/clientId/credentials/TLS) — not re-narrowed here.",
+          "properties": {
+            "host": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Site broker host."
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "Site broker port (e.g. 1883 plaintext, 8883 TLS)."
+            },
+            "clientId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "MQTT client id on the SITE broker — must be unique per bridge on that broker."
+            },
+            "credentials": {
+              "type": "object",
+              "additionalProperties": true,
+              "description": "mTLS credentials: certPath/keyPath/caPath (the standard edgecommons broker credentials shape). Omit for a plaintext/anonymous broker (dev only)."
+            },
+            "lwt": {
+              "not": {},
+              "description": "REJECTED at startup, not just disallowed here: the site Last-Will is not configurable. The bridge derives a protobuf `state` envelope with `status:\"UNREACHABLE\"` from its own resolved state topic and registers it as the site connection's Last-Will — a private bridge-console contract, never user config."
+            }
+          }
+        },
+        "uplink": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-class uplink policy (README \"Per-class uplink policy\"): enables, token-bucket rate caps, and the bounded `evt` disconnect-replay buffer. Every knob at every level is optional; the policy engine applies the defaults documented per property, not this schema.",
+          "properties": {
+            "classes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": true,
+                "description": "Unknown members inside a class entry are tolerated (forward compatibility, e.g. a future `onDisconnect`).",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "description": "Whether this class is relayed. Default: `true` for the six consumer classes (`state`, `cfg`, `evt`, `metric`, `data`, `log`), `false` for the opt-in seventh class `app` — a disabled `app` is never even subscribed. A disabled class's messages drop and count (`dropped_disabled`)."
+                  },
+                  "maxRatePerSec": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Token-bucket refill rate in messages/second. Absent = unlimited. `0` forwards only the initial `burst` then drops forever (prefer `enabled: false` to switch a class off entirely). Over-cap traffic drops and counts (`dropped_rate`); the live UNS path is deliberately not durable."
+                  },
+                  "burst": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Token-bucket capacity. Default: `2 × maxRatePerSec`. The bucket starts full."
+                  },
+                  "bufferWhileDisconnected": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "The D-B10 disconnect replay buffer. Honored for the `evt` class ONLY — set on any other class, it is ignored with a warning at startup.",
+                    "properties": {
+                      "enabled": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "Whether `evt` buffers (rather than drops) while the site link is down. Default on: a WAN blip must not lose an alarm raise/clear."
+                      },
+                      "maxMessages": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 1000,
+                        "description": "Buffer bound. Overflow drops the OLDEST buffered message (`evt_buffer_dropped`). `0` disables buffering entirely."
+                      }
+                    }
+                  }
+                }
+              },
+              "description": "Per-class policy keyed by class token: `state`, `cfg`, `evt`, `metric`, `data`, `log`, `app`. (`cmd` is never uplinked and has no policy slot — it is downlink-only, pinned to this bridge's own device.)"
+            }
+          }
+        },
+        "reply": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The TTL'd reply correlation-map knobs behind the site<->device `reply_to` proxy (README \"reply_to rewrite\").",
+          "properties": {
+            "ttlSecs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 60,
+              "description": "Correlation-entry TTL in seconds. PAIRED KNOB: default 60 = 2 x the framework's `messaging.requestTimeoutSeconds` default (30) — raising `requestTimeoutSeconds` should raise this in step, or the bridge may tear down a reply path before the requester's own deadline settles it."
+            },
+            "maxPending": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 1024,
+              "description": "In-flight correlation-entry bound. Overflow evicts the OLDEST entry (counted as expired early) rather than refusing fresh commands. `0` is treated as `1`."
+            }
+          }
+        },
+        "maxHops": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Hop-tag cap (loop protection, README \"Hop-tag loop protection\"): an envelope already carrying this many distinct bridge hop ids is dropped rather than relayed again, defending against a cycle among distinct bridges."
+        },
+        "queue": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-class bounded subscription queue depths on the device-bus uplink subscriptions. Overflow drops at the provider (with a warning).",
+          "properties": {
+            "data": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 512,
+              "description": "Queue depth for the `data` class subscription (deep — bursty telemetry)."
+            },
+            "default": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 64,
+              "description": "Queue depth for every other uplink subscription (shallow) and the downlink `cmd` subscription."
+            }
+          }
+        }
+      }
+    }
+  }
+}

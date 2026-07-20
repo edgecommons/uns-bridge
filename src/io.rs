@@ -674,9 +674,10 @@ impl RelayIo {
         // (§2.5: "on each site-connection RE-establishment").
         //
         // BRIDGE SIDE ONLY: the device-side `republish-*` listener that answers
-        // the broadcast is a separate 4-language edgecommons library slice —
-        // until it lands the broadcast is inert (see README "Reconnect
-        // rehydration").
+        // the broadcast ships in the edgecommons library itself (`RepublishListener`
+        // in Java/Python/TypeScript, `uns.rs` in Rust — see README "Reconnect
+        // rehydration"), so this broadcast is answered by every rev-bumped
+        // component in the fleet.
         {
             let governor = Arc::clone(&governor);
             let device_bus = Arc::clone(&primary);

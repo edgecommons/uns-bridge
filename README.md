@@ -15,7 +15,9 @@ rewrites `reply_to` so site→device request/reply crosses the bridge (the TTL'd
 `UNREACHABLE` for fast whole-device reachability detection.
 
 Design source of truth: `docs/platform/DESIGN-uns-bridge.md` (and `DESIGN-uns.md` §9) in the
-edgecommons monorepo. Section references below (§…) point there.
+edgecommons monorepo. Section references below (§…) point there. This repo's own `DESIGN.md` carries
+the local decision register (packaging, coverage, and config-schema decisions specific to this repo)
+plus its build history and current validation gaps.
 
 ## How it connects (§1, §2.1, §2.8)
 
@@ -37,9 +39,8 @@ standard edgecommons wire contract: normal UNS messages are protobuf `EdgeCommon
 bridge may decode that envelope to append `_relay` or rewrite `reply_to`, then re-encodes protobuf;
 opaque application bytes survive inside the protobuf body. Foreign/non-protobuf bytes on these relay
 paths are dropped as malformed rather than forwarded. The cost is one extra local TCP client on the
-device broker (trivial on HOST/EMQX). *Follow-up (Rust-only library affordance)*: expose the runtime's
-raw provider (e.g. `DefaultMessagingService::provider()`) so the relay can share it — one client less,
-which matters under the GREENGRASS shared-connection quota once the IPC-primary variant lands.
+device broker (trivial on HOST/EMQX; see `DESIGN.md` "Still deferred" for the library affordance that
+would let the relay share the runtime's connection instead).
 
 The relay runs at the **raw `MessagingProvider` level** on both of its connections, but only to bypass
 the `MessagingService` publish guard. The reserved-class publish guard is a `MessagingService` concern
@@ -299,45 +300,10 @@ The bridge and the site broker deploy **as a pair** — see
 | `src/main.rs` | The EdgeCommons runtime (observability) + the relay's provider-level connections (device fatal, site retried), private derived site LWT, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `tests/e2e_dual_broker.rs`, `tests/e2e/` | The P3-6 **dual-EMQX end-to-end test** (real binary between two real brokers, assertions A–F above) + its rig (`run.sh`, `docker-compose.e2e.yml`) |
-| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging stubs for the **bridge itself** (finalized with the GREENGRASS/IPC variant follow-up) |
+| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging for the **bridge itself**, covering the current HOST MQTT<->MQTT build (`DESIGN.md` "Still deferred" covers the IPC-primary variant) |
 | `deploy/site-broker/` | The **site broker's** deploy recipes (P3-5, D-B13): HOST compose, GREENGRASS `DockerApplicationManager` recipe, KUBERNETES manifests, and the per-device ACL — see [`deploy/site-broker/README.md`](deploy/site-broker/README.md) |
-
-## Roadmap (the Phase-3 slices)
-
-| Slice | Contents | Status |
-|---|---|---|
-| **P3-2** | repo scaffold; relay engine (six uplink filters + pinned downlink, topic-verbatim, hop tag/maxHops); unit tests over trait fakes | **done** |
-| **P3-3** | `reply_to` rewrite: TTL'd correlation map, maxPending eviction, reply back-haul | **done** |
-| **P3-4** | per-class uplink policy: enables, token-bucket rate caps, D-B10 disconnect behavior + the bounded drop-oldest `evt` replay buffer with in-order reconnect replay; per-class drop counters | **done** |
-| **P3-4b** | the bridge's own EdgeCommons observability (§2.8): heartbeat `state` keepalive + `cfg` announce + counters published as `metric`s (30 s, riding the bridge's own relay); private derived D-B11 site LWT; the bridge-side reconnect `republish-*` `_bcast` rehydration | **done** |
-| **P3-5** | `deploy/site-broker/` recipes (HOST compose + dual-EMQX dev rig, GG DockerApplicationManager, k8s in-cluster broker + boundary-bridge example, the per-device **ACL** file, TLS notes) | **done** |
-| **P3-6** | the repeatable **dual-EMQX bridge-level e2e** (`tests/e2e/run.sh` — real binary between two real brokers, 9/9 assertions A–F green) + the `edgecommons/registry` catalog entry (`category: bridge`) | **done** |
-
-### Release state & remaining follow-ups
-
-Shipped at the v0.2.0 UNS release:
-
-- **GitHub remote + git-rev pin bump — done.** `edgecommons/uns-bridge` is published, and
-  `Cargo.toml` pins `edgecommons` at rev `b1d8d85` — the v0.2.0 UNS release on `main` — so a pure
-  git-rev build compiles against the shipped UNS core (the gitignored sibling `[patch]` override
-  is local-dev only).
-- **The 4-language `republish-state`/`republish-cfg` broadcast listener — done.** It shipped in
-  the edgecommons library (`RepublishListener` in Java/Python/TS, `uns.rs` in Rust), so the bridge's
-  reconnect rehydration broadcast is now answered by every rev-bumped component — no longer inert.
-- **The edge-console as the first site-side client — done.** The full-system test (console ↔ site
-  broker ↔ bridge ↔ device components) has been run and passed (HOST → kind); the P3-6 e2e above
-  remains the *bridge-level* proof.
-
-Still deferred (genuinely unbuilt):
-
-- **GREENGRASS/IPC-primary variant** (PRIMARY = Nucleus IPC, SITE = MQTT): the `greengrass`
-  feature today only compiles the library's IPC provider; the IPC-primary relay wiring is the
-  follow-up, and **GREENGRASS** deployment validation rides it (HOST is proven by the e2e and
-  KUBERNETES by the boundary-bridge deploy of `deploy/site-broker/k8s/`).
-- Template substitution across the whole `instances[]` entry.
-- A Rust-only library affordance exposing the runtime's raw `MessagingProvider` so the relay can
-  share the runtime's device-bus connection (see "How it connects").
-- Docs-site sync of this component's docs into the edgecommons website.
+| `config.schema.json` | The `component.instances[]` config contract (`edgecommons component validate` checks against it) |
+| `AGENTS.md`, `CLAUDE.md`, `DESIGN.md` | Governance: agent notes, the Claude Code entry point, and the local decision register (build history, coverage/lockfile decisions, current validation gaps) |
 
 ## Operational rules
 

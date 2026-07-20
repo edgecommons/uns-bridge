@@ -5,9 +5,10 @@ greengrass-build/
 # local-dev sibling override (build against ../core/libs/rust instead of the pinned git rev)
 .cargo/
 
-# Cargo.lock excluded until P3-6 bumps the edgecommons pin to the UNS-core rev on main and regenerates
-# it (the current lock records the local .cargo [patch] path, invalid on a fresh clone).
-/Cargo.lock
+# Cargo.lock IS committed (org lockfile-commit policy): it is regenerated with the local
+# `.cargo` [patch] override INACTIVE so it records the pinned git rev, not a path source —
+# valid on a fresh clone and in CI. Never commit it after a build/test run made with the
+# `.cargo/config.toml` override active; regenerate from a clean checkout first.
 
 # site-broker local dev artifacts (generated dev/test certs, local port overrides) — never commit
 # key material, even throwaway dev-only material (deploy/site-broker/gen-tls-certs.sh, TLS.md).

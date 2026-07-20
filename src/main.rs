@@ -46,12 +46,9 @@
 //!   -c FILE ./test-configs/config.json -t gw-01
 //! ```
 //!
-//! ## Follow-ups (see README "Roadmap")
-//! - GREENGRASS variant (PRIMARY = Nucleus IPC) — P3-2..4b target the HOST
-//!   MQTT↔MQTT pair.
-//! - The device-side `republish-state`/`republish-cfg` listener (a 4-language
-//!   edgecommons library slice) — until it lands, the reconnect rehydration
-//!   broadcast is inert.
+//! ## Follow-ups (see DESIGN.md "Still deferred")
+//! - GREENGRASS variant (PRIMARY = Nucleus IPC) — this binary targets the HOST
+//!   MQTT↔MQTT pair; the IPC-primary relay wiring is not yet built.
 
 mod config;
 mod io;

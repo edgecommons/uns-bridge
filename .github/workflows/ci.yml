@@ -19,3 +19,46 @@ jobs:
       language: RUST
       rust-features: "standalone"
     secrets: inherit
+
+  coverage:
+    # The 90% line-coverage gate (baseline item WS-4 / issue #3 P0-2), actually RUN here (the
+    # reusable component-ci only does build/test/clippy). Excluded from the denominator: ONLY
+    # `src/main.rs`, the thin live-MQTT-driver wiring seam (runtime bootstrap, the real
+    # `MqttProvider::connect`/`connect_with_last_will` calls, the site retry loop) — it has no
+    # unit tests of its own and is validated instead by the gated dual-EMQX e2e
+    # (`tests/e2e_dual_broker.rs`, `UNS_BRIDGE_E2E=1`). Every other module (`config.rs`, `io.rs`,
+    # `observability.rs`, `policy.rs`, `relay.rs`, `reply.rs`) is pure logic exercised by the
+    # in-crate unit tests against the in-memory fake `MessagingProvider` and stays in the
+    # denominator at ~92-100% each. Do not widen this exclusion or lower the threshold to pass —
+    # add tests instead.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Authenticate to the private edgecommons git dependency
+        env:
+          # Same org read token the reusable workflow uses (secrets: inherit); the repo must be on
+          # that secret's allow-list. Rewrites the https git URL so cargo can fetch the private dep.
+          EDGECOMMONS_READ_TOKEN: ${{ secrets.EDGECOMMONS_READ_TOKEN }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${EDGECOMMONS_READ_TOKEN}@github.com/edgecommons/edgecommons.git".insteadOf \
+            "https://github.com/edgecommons/edgecommons.git"
+          git config --global \
+            url."https://x-access-token:${EDGECOMMONS_READ_TOKEN}@github.com/edgecommons/edgecommons".insteadOf \
+            "https://github.com/edgecommons/edgecommons"
+          git config --global \
+            url."https://x-access-token:${EDGECOMMONS_READ_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+      - name: Coverage gate (90% lines; live MQTT-driver seam excluded)
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+        run: >
+          cargo llvm-cov --features standalone
+          --ignore-filename-regex 'main\.rs'
+          --fail-under-lines 90
