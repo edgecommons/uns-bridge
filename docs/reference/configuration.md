@@ -10,7 +10,9 @@ Every configuration option. For *why* these exist, see [explanation.md](../expla
 The bridge reads **one JSON document**. That same file feeds two things: the edgecommons runtime loads it as
 the standard `-c FILE` config (and its top-level `messaging` section doubles as the `--transport MQTT`
 payload — the **device** bus), and the bridge reads its own `component.instances[]` from it (the **site**
-broker). The file is validated against the canonical edgecommons config schema at startup.
+broker). The file is validated against the canonical edgecommons config schema at startup, and
+[`config.schema.json`](../../config.schema.json) at the repo root models this bridge's own
+`component.instances[]` shape for `edgecommons component validate`.
 
 The bridge's CLI is minimal — `--config <file>` and `--thing <name>` — and synthesizes the standard edgecommons
 argv (`--platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`) internally.

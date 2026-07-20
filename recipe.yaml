@@ -1,9 +1,10 @@
 ---
-# PACKAGING STUB (P3-2). The GREENGRASS deployment of the bridge currently runs the binary in
-# HOST/MQTT shape against a device-local MQTT broker; the PRIMARY = IPC variant of the relay is a
-# documented follow-up.
-# The site-broker half landed in P3-5 (deploy/site-broker/); the remaining packaging wiring is
-# a release-time item (README "Remaining release-time items").
+# The GREENGRASS deployment of the bridge currently runs the binary in HOST/MQTT shape against a
+# device-local MQTT broker; see DESIGN.md "Still deferred" for the PRIMARY = IPC variant.
+# The site-broker half of a deployment is `deploy/site-broker/`.
+# No `component.name` key here: the canonical edgecommons config schema allows only
+# `global`/`instances` under `component` — the component's full name is supplied by the runtime
+# builder, never by config (see README "Configuration").
 RecipeFormatVersion: "2020-01-25"
 ComponentName: "com.mbreissi.edgecommons.UnsBridge"
 ComponentVersion: "1.0.0"
@@ -20,7 +21,6 @@ ComponentConfiguration:
       metricEmission:
         target: "messaging"
       component:
-        name: "com.mbreissi.edgecommons.UnsBridge"
         instances:
           - id: "site"
             siteBroker:
