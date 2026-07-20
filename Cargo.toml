@@ -3,7 +3,7 @@ name = "uns-bridge"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-license = "Apache-2.0"
+license = "BUSL-1.1"
 description = "Envelope-aware UNS relay between a device-local bus and the site UNS broker: uplinks the six edgecommons UNS classes topic-verbatim, downlinks own-device commands, with hop-tag loop protection. One uns-bridge per device bus."
 publish = false
 
@@ -23,7 +23,7 @@ default = ["standalone"]
 standalone = ["edgecommons/standalone"]
 # GREENGRASS variant (PRIMARY = Nucleus IPC, SITE = MQTT): the edgecommons IPC provider is a
 # Linux-only C-FFI build. The IPC-primary wiring in this component is a documented follow-up
-# (see README "Roadmap"); enabling this feature today only compiles the library's IPC provider.
+# (see DESIGN.md "Still deferred"); enabling this feature today only compiles the library's IPC provider.
 greengrass = ["edgecommons/greengrass"]
 
 [dependencies]
