@@ -68,7 +68,8 @@ docker compose --profile dual up -d   # adds a throwaway device broker on :1883 
 Then run the bridge against it (from the repo root):
 
 ```bash
-cargo run -- --config ./test-configs/config.json --thing gw-01
+cargo run -- --platform HOST --transport MQTT ./test-configs/config.json \
+  -c FILE ./test-configs/config.json --thing gw-01
 ```
 
 ### Two ways to run this locally

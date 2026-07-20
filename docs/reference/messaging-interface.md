@@ -77,8 +77,8 @@ ecv1/+/+/+/metric/#  ecv1/+/+/+/data/#   ecv1/+/+/+/log/#
 
 ## What the bridge itself publishes
 
-Because the bridge is a edgecommons component, it also **originates** traffic (on the device bus, via its
-OBSERVABILITY connection), which then rides its own uplink to the site:
+Because the bridge is a edgecommons component, it also **originates** traffic (on the device bus, through the
+runtime's shared connection), which then rides its own uplink to the site:
 
 | Topic | Class | Cadence | What |
 |-------|-------|---------|------|
@@ -135,13 +135,15 @@ ACL-enforcing site broker.
 
 ## CLI
 
-The bridge's minimal CLI:
+The bridge uses the standard edgecommons CLI:
 
 | Flag | Values | Notes |
 |------|--------|-------|
-| `-c`, `--config` | `<file>` | Bridge config file (default `test-configs/config.json`). Feeds both the runtime (`-c FILE <file>`) and the bridge's own site parse. |
+| `--platform` | `HOST` \| `GREENGRASS` \| `KUBERNETES` \| `auto` | Deployment platform. Selects the device-bus transport default (MQTT on HOST, IPC on GREENGRASS). |
+| `--transport` | `MQTT <messaging_config>` \| `IPC` | Device-bus transport. `MQTT` takes the messaging-config path (the bridge config file); `IPC` (Greengrass-only) takes none. |
+| `-c`, `--config` | `<SOURCE> [args…]` | Config source — a **keyword** first: `FILE <file>` on HOST, `GG_CONFIG` on GREENGRASS. A bare path is not accepted. |
 | `-t`, `--thing` | `<name>` | Device (thing) token — the `{device}` of every UNS topic. Falls back to `$EDGECOMMONS_THING_NAME`; required (via one or the other). Takes the **full** string (guards the historical one-char truncation bug). |
 | `-h`, `--help` | — | Usage. |
 
-Internally the runtime is built with the synthesized standard argv
-`uns-bridge --platform HOST --transport MQTT <file> -c FILE <file> -t <thing>`.
+- HOST: `uns-bridge --platform HOST --transport MQTT <config> -c FILE <config> -t <thing>`
+- GREENGRASS: `uns-bridge --platform GREENGRASS --transport IPC -c GG_CONFIG -t <thing>`

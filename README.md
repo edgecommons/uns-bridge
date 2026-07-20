@@ -21,31 +21,34 @@ plus its build history and current validation gaps.
 
 ## How it connects (§1, §2.1, §2.8)
 
-Since P3-4b the bridge is a **proper edgecommons component**: a real `EdgeCommons` runtime (built from
-the same config file) owns the bridge's own observability. The bridge therefore holds **three**
-connections:
+The bridge is a **proper edgecommons component**: a real `EdgeCommons` runtime (built from the same
+config) owns the bridge's own observability. The bridge holds **two** connections:
 
 | Connection | What | Built from |
 |---|---|---|
-| **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime: identity, the automatic heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` publisher, `gg.metrics()` (`metricEmission.target = "messaging"`), logging init, SIGTERM handling | the standard `messaging` config section — the config file doubles as the `--transport MQTT` payload |
-| **RELAY PRIMARY** (device bus) | the provider-level protobuf relay (§1.3) + reply proxy + rehydration broadcast | the same `messaging` section with the client id suffixed **`-relay`** (two MQTT clients must not share an id) |
-| **SITE** | the site UNS broker — the bridge's **external system**; carries the private bridge-console D-B11 LWT | the bridge's own `component.instances[]` `"site"` entry for the broker endpoint; the bridge derives the LWT from its canonical state topic and passes it to `MqttProvider::connect_with_last_will` |
+| **DEVICE BUS** (shared) | the `EdgeCommons` runtime's observability — identity, the automatic heartbeat `state` keepalive, the effective-(redacted-)config `cfg` publisher, `gg.metrics()` (`metricEmission.target = "messaging"`), logging init, SIGTERM handling — **and** the relay itself: the provider-level protobuf relay (§1.3), the reply proxy, and the rehydration broadcast | the runtime's resolved transport (**MQTT on HOST**, **Nucleus IPC on GREENGRASS**); the relay shares it via `gg.raw_device_provider()` (`EdgeCommons::raw_device_provider`) |
+| **SITE** | the site UNS broker — the bridge's **external system**; carries the private bridge-console D-B11 LWT; always MQTT, independent of the device-bus transport | the bridge's own `component.instances[]` `"site"` entry for the broker endpoint; the bridge derives the LWT from its canonical state topic and passes it to `MqttProvider::connect_with_last_will` |
 
-Why two device-bus connections: `EdgeCommons` deliberately does **not** expose its raw
-`MessagingProvider` (`DefaultMessagingService` keeps it private), and the relay must stay at the
-provider level — below the reserved-class guard (§1.3) — so sharing the runtime's connection would
-require a edgecommons change this slice deliberately does not make. The payload contract is still the
-standard edgecommons wire contract: normal UNS messages are protobuf `EdgeCommonsMessage` bytes. The
-bridge may decode that envelope to append `_relay` or rewrite `reply_to`, then re-encodes protobuf;
-opaque application bytes survive inside the protobuf body. Foreign/non-protobuf bytes on these relay
-paths are dropped as malformed rather than forwarded. The cost is one extra local TCP client on the
-device broker (trivial on HOST/EMQX; see `DESIGN.md` "Still deferred" for the library affordance that
-would let the relay share the runtime's connection instead).
+The relay shares the runtime's **one** device-bus connection: `gg.raw_device_provider()` hands back the
+runtime's raw `MessagingProvider` — the same connection it already uses — so the relay operates at the
+raw-provider level **below** the reserved-class publish guard (§1.3). Working below the guard is what
+lets the bridge forward reserved classes (`state`/`metric`/`cfg`/`log`) verbatim; it also means one
+device-bus client instead of two, which matters under the Greengrass shared-connection quota. The
+payload contract is the standard edgecommons wire contract: normal UNS messages are protobuf
+`EdgeCommonsMessage` bytes. The bridge may decode that envelope to append `_relay` or rewrite
+`reply_to`, then re-encodes protobuf; opaque application bytes survive inside the protobuf body.
+Foreign/non-protobuf bytes on the relay paths are dropped as malformed rather than forwarded.
 
-The relay runs at the **raw `MessagingProvider` level** on both of its connections, but only to bypass
-the `MessagingService` publish guard. The reserved-class publish guard is a `MessagingService` concern
-and is deliberately not in this path (§1.3) — the site broker's **per-device ACL** is the durable
-boundary: a bridge may publish only under its own `ecv1/{device}/#` subtree.
+The reserved-class publish guard is a `MessagingService` concern and is deliberately not in the relay
+path (§1.3) — the site broker's **per-device ACL** is the durable boundary: a bridge may publish only
+under its own `ecv1/{device}/#` subtree.
+
+**HOST and GREENGRASS.** On HOST the device bus is a local MQTT broker (default `standalone` feature);
+on a Greengrass core it is the Nucleus IPC pubsub (`greengrass` feature — a Linux-only C-FFI IPC
+provider). Either way the relay's PRIMARY is whatever transport the runtime resolved, so a single code
+path serves both. The site half is always MQTT.
+- HOST: `uns-bridge --platform HOST --transport MQTT ./config.json -c FILE ./config.json -t gw-01`
+- GREENGRASS: deployed by `recipe.yaml` with `--platform GREENGRASS --transport IPC -c GG_CONFIG -t {iot:thingName}` (built with `--features greengrass`).
 
 The site uplink is intermittent by design (edge-first): the bridge comes up and serves the device
 bus while the WAN is down, retrying the site connect in its own loop (§1.4); the provider
@@ -296,11 +299,11 @@ The bridge and the site broker deploy **as a pair** — see
 | `src/policy.rs` | The **pure** §2.5/D-B10 uplink policy: per-class enables, token buckets (injected clock), and the bounded drop-oldest `evt` replay buffer — no IO |
 | `src/observability.rs` | The **pure** §2.8 pieces: the counter→metric mapping (snapshot deltas → named measure groups) — no IO |
 | `src/io.rs` | The pumps: provider-level subscriptions → `RelayEngine::decide` → the §2.5 policy governor (uplink) / the reply rewrite (downlink) → topic-verbatim republish; per-reply one-shot pumps + the TTL sweep + the connectivity watcher (rising-edge rehydration broadcast + evt replay) + the 30 s metric emission; counters; unsubscribe-on-shutdown (incl. pending reply topics) |
-| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; the relay's `-relay`-suffixed device connection; typed `reply` + `uplink` knobs |
-| `src/main.rs` | The EdgeCommons runtime (observability) + the relay's provider-level connections (device fatal, site retried), private derived site LWT, graceful stop |
+| `src/config.rs` | The §2.7 config shape; maps the `"site"` instance entry onto the core `MessagingConfig`; typed `reply` + `uplink` knobs (the device bus is the runtime's shared provider, not parsed here) |
+| `src/main.rs` | The EdgeCommons runtime (observability) + the relay's PRIMARY from `gg.raw_device_provider()` (fatal if no transport), the retried site connection, the private derived site LWT, graceful stop |
 | `test-configs/` | Sample dual-broker config |
 | `tests/e2e_dual_broker.rs`, `tests/e2e/` | The P3-6 **dual-EMQX end-to-end test** (real binary between two real brokers, assertions A–F above) + its rig (`run.sh`, `docker-compose.e2e.yml`) |
-| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging for the **bridge itself**, covering the current HOST MQTT<->MQTT build (`DESIGN.md` "Still deferred" covers the IPC-primary variant) |
+| `recipe.yaml`, `gdk-config.json`, `build.sh` | GREENGRASS packaging for the **bridge itself**: the device-IPC ↔ site-MQTT deploy (`--platform GREENGRASS --transport IPC -c GG_CONFIG`, IPC pubsub `accessControl`, the `greengrass` feature build) |
 | `deploy/site-broker/` | The **site broker's** deploy recipes (P3-5, D-B13): HOST compose, GREENGRASS `DockerApplicationManager` recipe, KUBERNETES manifests, and the per-device ACL — see [`deploy/site-broker/README.md`](deploy/site-broker/README.md) |
 | `config.schema.json` | The `component.instances[]` config contract (`edgecommons component validate` checks against it) |
 | `AGENTS.md`, `CLAUDE.md`, `DESIGN.md` | Governance: agent notes, the Claude Code entry point, and the local decision register (build history, coverage/lockfile decisions, current validation gaps) |

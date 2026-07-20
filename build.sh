@@ -14,8 +14,8 @@ COMPONENT_NAME="com.mbreissi.edgecommons.UnsBridge"
 COMPONENT_VERSION="1.0.0"
 BIN_NAME="uns-bridge"
 
-# P3-2 ships the standalone (dual-MQTT) relay; the greengrass (IPC-primary) variant is a
-# documented follow-up.
+# `standalone` = HOST (device + site both MQTT). `greengrass` = device IPC + site MQTT (it builds on
+# `standalone` for the site provider); build it on a Linux toolchain (the IPC provider is C-FFI).
 FEATURES="${EDGECOMMONS_FEATURES:-standalone}"
 TARGET="${EDGECOMMONS_TARGET:-}"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"

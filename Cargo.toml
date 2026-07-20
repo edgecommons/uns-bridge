@@ -10,32 +10,38 @@ publish = false
 # The uns-bridge component (DESIGN-uns §9 / DESIGN-uns-bridge in the edgecommons monorepo).
 # The site broker is the bridge's EXTERNAL SYSTEM (like an adapter's OPC UA endpoints): the
 # bridge builds its site connection by reusing the edgecommons core's already-pub MQTT objects
-# (`MqttProvider::connect`) from its own `component.instances[]` config — ZERO core change.
+# (`MqttProvider::connect_with_last_will`) from its own `component.instances[]` config. The relay's
+# device-bus PRIMARY is the runtime's OWN raw provider (`gg.raw_device_provider()` — core #58),
+# shared below the reserved-class guard: IPC on GREENGRASS, MQTT on HOST, one client either way.
 
 [[bin]]
 name = "uns-bridge"
 path = "src/main.rs"
 
 [features]
-# HOST / KUBERNETES-boundary binary: dual raw MQTT (device bus + site broker). This is the
-# P3-2 target pair (MQTT <-> MQTT).
+# HOST / KUBERNETES-boundary binary: device bus + site broker both MQTT (the P3-2 pair). The
+# `standalone` feature gates the edgecommons `mqtt` provider module (`MqttProvider`), which the
+# SITE connection ALWAYS uses — on every platform — so it is the base every build needs.
 default = ["standalone"]
 standalone = ["edgecommons/standalone"]
-# GREENGRASS variant (PRIMARY = Nucleus IPC, SITE = MQTT): the edgecommons IPC provider is a
-# Linux-only C-FFI build. The IPC-primary wiring in this component is a documented follow-up
-# (see DESIGN.md "Still deferred"); enabling this feature today only compiles the library's IPC provider.
-greengrass = ["edgecommons/greengrass"]
+# GREENGRASS variant (device bus = Nucleus IPC, site = MQTT). It BUILDS ON `standalone`: the
+# SITE half is still MQTT (`MqttProvider::connect_with_last_will`), so the mqtt provider must be
+# compiled in alongside the IPC provider. `edgecommons/greengrass` adds the Linux-only C-FFI IPC
+# provider that the runtime resolves as the shared device-bus PRIMARY. Build/link it on Linux/WSL.
+greengrass = ["standalone", "edgecommons/greengrass"]
 
 [dependencies]
 # The edgecommons Rust library (git-rev pinned — the telemetry-processor pattern; CI resolves
 # this rev, LOCAL DEV builds against the sibling checkout via the gitignored
 # .cargo/config.toml `[patch]` override and never touches this pin).
 #
-# The pin below is the current core `main`, which carries the grammar / top-level identity / `gg.uns()` /
-# reserved-guard / `request()`-deadline / LWT surface plus the `_bcast` republish listener this bridge
-# relies on. A pure git-rev build compiles against it; the gitignored `.cargo/config.toml` `[patch]`
-# override is only for local dev against uncommitted sibling-lib changes.
-edgecommons = { git = "https://github.com/edgecommons/edgecommons.git", rev = "36a70c48b65b35f77bfab70d3a73869debdfc407", default-features = false }
+# The pin below carries the raw-device-provider affordance (`EdgeCommons::raw_device_provider()` /
+# `DefaultMessagingService::provider()`, core PR #58) that the relay's shared-PRIMARY wiring needs,
+# on top of the grammar / top-level identity / `gg.uns()` / reserved-guard / `request()`-deadline /
+# LWT surface plus the `_bcast` republish listener this bridge relies on. A pure git-rev build
+# compiles against it; the gitignored `.cargo/config.toml` `[patch]` override is only for local dev
+# against the sibling-lib checkout (point it at wherever the affordance code lives locally).
+edgecommons = { git = "https://github.com/edgecommons/edgecommons.git", rev = "6d836fe917cf21c1930daaaab087c06f2a71adfb", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

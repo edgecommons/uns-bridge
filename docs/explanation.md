@@ -22,48 +22,45 @@ serving the device bus even while the WAN to the site is down; the site connecti
 and reconnects transparently. Data lost during an outage is lost by design — durability is the streaming
 subsystem's job, not the bus's — with one deliberate exception: events/alarms (`evt`).
 
-## The three connections
+## The two connections
 
-A common first assumption is that a bridge is one process with two connections (device and site). It is
-actually **three**, because the bridge is a proper edgecommons component that also needs to observe *itself*.
+A bridge is one process with two connections: the **device bus** and the **site broker**. The device-bus
+connection is shared — the `EdgeCommons` runtime owns it for the bridge's own observability, and the relay
+borrows the very same connection through the runtime's raw provider.
 
 ```mermaid
 flowchart LR
-  subgraph device["Device bus (local MQTT / Nucleus IPC)"]
-    obs["OBSERVABILITY conn\n(EdgeCommons runtime)"]
-    relayp["RELAY PRIMARY conn\n(provider-level, id …-relay)"]
+  subgraph device["Device bus (local MQTT on HOST / Nucleus IPC on GREENGRASS)"]
+    conn["ONE device-bus connection\n(runtime's provider, shared)"]
   end
-  subgraph site["Site UNS broker"]
-    sitec["SITE conn\n(reused MqttProvider + derived LWT)"]
+  subgraph site["Site UNS broker (MQTT)"]
+    sitec["SITE conn\n(MqttProvider + derived LWT)"]
   end
-  runtime["edgecommons runtime:\nidentity · heartbeat state ·\ncfg announce · gg.metrics()"] --> obs
-  engine["Relay engine + policy +\nreply proxy"] --> relayp
+  runtime["edgecommons runtime:\nidentity · heartbeat state ·\ncfg announce · gg.metrics()"] --> conn
+  engine["Relay engine + policy +\nreply proxy"] -. "gg.raw_device_provider()" .-> conn
   engine --> sitec
-  relayp -. "uplink 6 classes\n(incl. the bridge's OWN state/cfg/metric)" .-> sitec
-  sitec -. "downlink cmd\n(own device)" .-> relayp
+  conn -. "uplink 6 classes\n(incl. the bridge's OWN state/cfg/metric)" .-> sitec
+  sitec -. "downlink cmd\n(own device)" .-> conn
 ```
 
 | Connection | Owner | Built from | Purpose |
 |---|---|---|---|
-| **OBSERVABILITY** (device bus) | the `EdgeCommons` runtime | the standard `messaging` section of the config file (which doubles as the `--transport MQTT` payload) | the bridge's own identity, logging init, the heartbeat `state` keepalive on `ecv1/{device}/uns-bridge/main/state`, the effective-(redacted-)config `cfg` announce, `gg.metrics()`, and the library-owned SIGTERM/Ctrl-C shutdown signal |
-| **RELAY PRIMARY** (device bus) | the bridge | the same `messaging` section, with `-relay` appended to every client id | the provider-level protobuf relay, the reply proxy's device-side reply topics, and the reconnect rehydration broadcast |
-| **SITE** | the bridge | the bridge's own `component.instances[]` `"site"` entry, by reusing the edgecommons core's public MQTT provider with a bridge-derived Last-Will | the uplink target and downlink source; carries the private Last-Will `UNREACHABLE` contract |
+| **DEVICE BUS** (shared) | the `EdgeCommons` runtime; the relay borrows it | the runtime's resolved transport — **MQTT on HOST** (`--transport MQTT`), **Nucleus IPC on GREENGRASS** (`--transport IPC`); the relay obtains the same raw provider via `gg.raw_device_provider()` | the bridge's own identity, logging init, the heartbeat `state` keepalive, the effective-(redacted-)config `cfg` announce, `gg.metrics()`, and the library-owned SIGTERM/Ctrl-C shutdown — **and** the provider-level protobuf relay, the reply proxy's device-side reply topics, and the reconnect rehydration broadcast |
+| **SITE** | the bridge | the bridge's own `component.instances[]` `"site"` entry, by reusing the edgecommons core's public MQTT provider with a bridge-derived Last-Will (always MQTT) | the uplink target and downlink source; carries the private Last-Will `UNREACHABLE` contract |
 
-**Why two connections to the *same* device bus?** The relay must operate at the **raw provider level** —
-below the reserved-class publish guard — because it forwards messages other components authored (including
-publishes to reserved classes like `state`/`metric`). That does not make arbitrary bytes part of the normal
-relay contract: edgecommons UNS messages are protobuf `EdgeCommonsMessage` bytes, and the bridge decodes,
-mutates relay metadata, and re-encodes that envelope. Foreign/non-protobuf payloads on these paths are dropped
-as malformed. The `EdgeCommons` runtime deliberately keeps its raw `MessagingProvider` private (its
-`MessagingService` always enforces the reserved-class guard), so the relay cannot borrow the runtime's
-connection. The cost is one extra local TCP client on the device broker — trivial on HOST — and the two
-clients must not share an MQTT id (a shared id makes the broker evict them in a session-takeover loop), hence
-the `-relay` suffix.
+**Why the relay shares the runtime's device-bus connection.** The relay must operate at the **raw provider
+level** — below the reserved-class publish guard — because it forwards messages other components authored
+(including publishes to reserved classes like `state`/`metric`). The runtime exposes its own raw
+`MessagingProvider` through `gg.raw_device_provider()` precisely for guard-bypassing relays, so the relay
+uses the runtime's single connection rather than opening a second one — which spares a client under the
+Greengrass shared-connection quota. This does not make arbitrary bytes part of the relay contract:
+edgecommons UNS messages are protobuf `EdgeCommonsMessage` bytes, and the bridge decodes, mutates relay
+metadata, and re-encodes that envelope. Foreign/non-protobuf payloads on these paths are dropped as malformed.
 
-The elegant consequence: because the bridge's own `state`/`cfg`/`metric` traffic goes out on the
-OBSERVABILITY connection and *matches the relay's own uplink filters*, the bridge is relayed to the site
-broker **by itself**. The site sees the bridge exactly as it sees any other component — no special-casing —
-plus the one thing only the bridge sets: the private site-connection Last-Will.
+The elegant consequence: because the bridge's own `state`/`cfg`/`metric` traffic goes out on that shared
+connection and *matches the relay's own uplink filters*, the bridge is relayed to the site broker **by
+itself**. The site sees the bridge exactly as it sees any other component — no special-casing — plus the one
+thing only the bridge sets: the private site-connection Last-Will.
 
 ## The relay matrix — what crosses, and which way
 
@@ -196,18 +193,20 @@ silently break console reachability.
 ## Platforms: where a bridge runs
 
 - **HOST** — the primary target. Device bus and site bus are both MQTT brokers; the bridge is a plain binary
-  (`--platform HOST`, `--transport MQTT` synthesized internally). This is what the tutorial and the e2e test
-  exercise.
+  run with the standard args `--platform HOST --transport MQTT <config> -c FILE <config> -t <thing>`. This is
+  what the tutorial and the e2e test exercise.
 - **KUBERNETES** — the *same binary* deployed as a **boundary bridge** between an on-prem device bus and an
   in-cluster aggregation broker. It must be **`replicas: 1` + `strategy: Recreate`** — exactly one bridge per
   device bus (two would double-deliver everything; the hop tag prevents loops, not duplicates). Note the
   asymmetry: there is **no** bridge *inside* a cluster — the in-cluster broker is itself the aggregation
   point; a bridge only appears at a boundary.
-- **GREENGRASS** — on a Greengrass core the bridge runs in its **HOST/MQTT** shape against a device-local
-  MQTT broker: it requires the default `standalone` feature, and the packaging `recipe.yaml` targets that
-  shape (HOST-style config via `GG_CONFIG`). A **PRIMARY = Nucleus IPC** device bus (with the site half over
-  MQTT) is not supported. (The **site broker's** own Greengrass deployment recipe exists under
-  `deploy/site-broker/greengrass/` — but that runs the *broker*, not a bridge inside a core.)
+- **GREENGRASS** — on a Greengrass core the device bus is the **Nucleus IPC** pubsub and the site half is
+  MQTT. The bridge shares the runtime's IPC provider as its relay PRIMARY, so the same relay serves IPC and
+  MQTT device buses alike. This build needs the `greengrass` cargo feature (a Linux-only C-FFI IPC provider,
+  layered on `standalone` for the site MQTT provider); the packaging `recipe.yaml` runs it with `--platform
+  GREENGRASS --transport IPC -c GG_CONFIG -t {iot:thingName}` and grants IPC pubsub `accessControl` for the
+  local UNS topics. (The **site broker's** own Greengrass deployment recipe under
+  `deploy/site-broker/greengrass/` runs the *broker*, not a bridge inside a core.)
 
 ## A note on security
 
@@ -225,5 +224,5 @@ broker as the bridge's paired half.
 - It does not transform payloads, re-key topics, or filter by content — it is a relay, not an ETL step.
 - It does not uplink `cmd` or support cross-device request/reply.
 - It does not make the live path durable — that is the streaming subsystem.
-- It does not run inside a Kubernetes cluster, and it does not run over Greengrass IPC as the primary device bus.
+- It does not run *inside* a Kubernetes cluster (only at a boundary) — but it does run on a Greengrass core over Nucleus IPC as the primary device bus.
 - It does not enforce the site security boundary in code — the site broker's ACL/mTLS does.

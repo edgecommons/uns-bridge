@@ -13,32 +13,33 @@
 //! traffic matches the bridge's own uplink filters, so it **rides its own relay**
 //! to the site broker.
 //!
-//! ## The three connections (the P3-4b connection-architecture decision)
+//! ## The two connections (the connection-architecture decision)
 //!
 //! | Connection | Owner | Purpose |
 //! |---|---|---|
-//! | device bus (observability) | the `EdgeCommons` runtime | heartbeat `state`, `cfg` announce, `metric` emission |
-//! | device bus (relay, client id `…-relay`) | the bridge | the provider-level protobuf relay (§1.3) + the reply proxy + the rehydration broadcast |
+//! | device bus | the `EdgeCommons` runtime, **shared** with the relay | the runtime's heartbeat `state`, `cfg` announce, and `metric` emission (through the reserved-class guard), plus — via the runtime's raw provider — the relay's provider-level protobuf relay (§1.3), the reply proxy, and the rehydration broadcast (below the guard) |
 //! | site broker | the bridge | the uplink/downlink relay target; carries the D-B11 LWT |
 //!
-//! `EdgeCommons` deliberately does **not** expose its raw `MessagingProvider`
-//! (`DefaultMessagingService` keeps it private), and the relay must stay at the
-//! raw provider level — below the reserved-class guard (§1.3) — so the relay
-//! cannot reuse the runtime's connection **without a edgecommons change, which
-//! this slice deliberately does not make**. Normal relay payloads remain
-//! protobuf `EdgeCommonsMessage` bytes. Follow-up (Rust-only library affordance):
-//! expose the runtime's raw provider (e.g.
-//! `DefaultMessagingService::provider()`), letting the relay share the runtime's
-//! device-bus connection — one client less, which matters under the GREENGRASS
-//! shared-connection quota once the IPC-primary variant lands.
+//! The relay's PRIMARY is the runtime's own device-bus provider, obtained via the
+//! core affordance `gg.raw_device_provider()` (`EdgeCommons::raw_device_provider`,
+//! backed by `DefaultMessagingService::provider`). This is the SAME transport the
+//! runtime already resolved — **IPC on GREENGRASS** (the `greengrass` feature),
+//! **MQTT on HOST** (`standalone`) — so the bridge holds ONE device-bus client, not
+//! two. The relay publishes/subscribes raw protobuf `EdgeCommonsMessage` bytes
+//! across every class **below the reserved-class publish guard** (§1.3): that guard
+//! is a `MessagingService` concern and the raw provider is beneath it, which is
+//! exactly what lets the bridge relay reserved classes (`state`/`metric`/`cfg`/
+//! `log`) verbatim. Sharing the one connection unifies HOST and GREENGRASS and
+//! spares a client under the Greengrass shared-connection quota.
 //!
 //! - **SITE** connection = the bridge's external system, declared in its own
 //!   `component.instances[]` "site" entry and built by **reusing the edgecommons
-//!   core's MQTT provider** (`MqttProvider::connect_with_last_will`). The site
-//!   Last-Will is a private bridge-console contract derived from the bridge's
-//!   canonical UNS state topic, not user config. The site connect is retried in
-//!   the bridge's own loop (non-fatal uplink, §1.4); the provider re-subscribes
-//!   every filter on each CONNACK, so reconnection is transparent.
+//!   core's MQTT provider** (`MqttProvider::connect_with_last_will`) — always MQTT,
+//!   independent of the device-bus transport. The site Last-Will is a private
+//!   bridge-console contract derived from the bridge's canonical UNS state topic,
+//!   not user config. The site connect is retried in the bridge's own loop
+//!   (non-fatal uplink, §1.4); the provider re-subscribes every filter on each
+//!   CONNACK, so reconnection is transparent.
 //!
 //! ## Run locally (HOST, device broker :1883 + site broker :1884)
 //! ```bash
@@ -46,9 +47,12 @@
 //!   -c FILE ./test-configs/config.json -t gw-01
 //! ```
 //!
-//! ## Follow-ups (see DESIGN.md "Still deferred")
-//! - GREENGRASS variant (PRIMARY = Nucleus IPC) — this binary targets the HOST
-//!   MQTT↔MQTT pair; the IPC-primary relay wiring is not yet built.
+//! ## Run on Greengrass (device IPC ↔ site MQTT)
+//! Deployed by `recipe.yaml` with `--platform GREENGRASS --transport IPC -c
+//! GG_CONFIG -t {iot:thingName}`; the device bus is the Nucleus IPC pubsub (no
+//! `messaging` section needed), the site broker comes from the deployment's
+//! `component.instances[]` `siteBroker`. Requires the `greengrass` feature
+//! (Linux-only C-FFI IPC provider).
 
 mod config;
 mod io;
@@ -71,11 +75,10 @@ use serde_json::json;
 use crate::config::BridgeConfig;
 use crate::relay::RelayEngine;
 
-#[cfg(not(feature = "standalone"))]
-compile_error!(
-    "uns-bridge targets the HOST MQTT<->MQTT pair; build with the default `standalone` \
-     feature (the GREENGRASS primary=IPC variant is a documented follow-up)"
-);
+// The crate builds for both device-bus transports: the default `standalone` feature
+// (HOST, MQTT) and the Linux-only `greengrass` feature (GREENGRASS, Nucleus IPC). The
+// relay's PRIMARY is whichever transport the runtime resolves (`gg.raw_device_provider()`),
+// so a single code path serves both.
 
 /// The component's full name (matches `recipe.yaml` / `gdk-config.json`; its
 /// sanitized UNS token is exactly `uns-bridge`, D-U18).
@@ -115,11 +118,11 @@ fn site_unreachable_last_will(topic: String, payload: Vec<u8>) -> MqttLastWill {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // §2.8: the edgecommons runtime — the bridge's OBSERVABILITY device-bus
-    // connection plus identity, logging init, the heartbeat `state` keepalive,
-    // the effective-config `cfg` publisher, gg.metrics(), and the library-owned
-    // SIGTERM/Ctrl-C shutdown signal. A dead device bus is fatal — the bridge is
-    // useless without it (unlike the site uplink, which retries below).
+    // §2.8: the edgecommons runtime — the bridge's device-bus connection (which the
+    // relay then SHARES, below) plus identity, logging init, the heartbeat `state`
+    // keepalive, the effective-config `cfg` publisher, gg.metrics(), and the
+    // library-owned SIGTERM/Ctrl-C shutdown signal. A dead device bus is fatal — the
+    // bridge is useless without it (unlike the site uplink, which retries below).
     let gg = EdgeCommonsBuilder::new(COMPONENT_NAME)
         .args(std::env::args_os())
         .build()
@@ -148,19 +151,20 @@ async fn main() -> anyhow::Result<()> {
         "uns-bridge starting"
     );
 
-    // RELAY PRIMARY: the bridge's second, provider-level device-bus connection
-    // (client id suffixed `-relay` so it never collides with the runtime's). The
-    // relay runs below the MessagingService guard by design (§1.3); see the
-    // module docs for why it cannot share the runtime's connection without a
-    // (deliberately unmade) edgecommons change.
-    let primary: Arc<dyn MessagingProvider> = Arc::new(
-        MqttProvider::connect(&cfg.relay_primary_messaging())
-            .await
-            .context(
-                "connecting the relay's device-bus (PRIMARY) connection — is the local broker up?",
-            )?,
+    // RELAY PRIMARY = the runtime's OWN raw device-bus provider (core #58's
+    // affordance): the SAME connection the runtime already resolved for its
+    // observability — IPC on GREENGRASS, MQTT on HOST — handed back below the
+    // reserved-class publish guard (§1.3) so the relay forwards raw protobuf across
+    // ALL classes verbatim, WITHOUT opening a second device-bus client. `None` means
+    // the runtime wired no transport, which for a relay is fatal: there is no device
+    // bus to relay.
+    let primary: Arc<dyn MessagingProvider> = gg.raw_device_provider().context(
+        "the runtime resolved no messaging transport — a bridge has no device bus to relay; \
+         supply --transport IPC (GREENGRASS) or --transport MQTT <path> (HOST)",
+    )?;
+    tracing::info!(
+        "relay shares the runtime's device-bus provider (raw, below the reserved-class guard)"
     );
-    tracing::info!("relay device-bus connection established");
 
     let site_cfg = site_entry.site_messaging()?;
     let site_lwt_topic = gg

@@ -50,6 +50,40 @@ baseline-adoption and packaging decisions specific to this repo — not a restat
   remaining follow-ups", and "Still deferred" sections moved here (below) per the org's public-docs
   rule: user-facing docs describe current behavior only, in present tense; status/history/roadmap
   belongs in internal docs.
+- **D-UB-6 (GREENGRASS/IPC-primary relay — the shared-provider architecture).** The relay's device-bus
+  PRIMARY is the `EdgeCommons` runtime's OWN raw provider, obtained via the core affordance
+  `gg.raw_device_provider()` (`EdgeCommons::raw_device_provider` → `DefaultMessagingService::provider`,
+  core PR #58, pinned rev `6d836fe917cf21c1930daaaab087c06f2a71adfb`). Consequences, all binding:
+  - **One device-bus connection, shared below the guard.** The relay no longer opens a second
+    device-bus client (the former `-relay`-suffixed `MqttProvider::connect`). It shares the runtime's
+    single connection at the raw-provider level — below the reserved-class publish guard (§1.3), which
+    is what lets it forward reserved classes (`state`/`metric`/`cfg`/`log`) verbatim — sparing a client
+    under the Greengrass shared-connection quota. The bridge now holds **two** connections total
+    (device bus + site), not three.
+  - **HOST and GREENGRASS unified.** The PRIMARY is whatever transport the runtime resolved: **MQTT on
+    HOST** (`standalone`), **Nucleus IPC on GREENGRASS** (`greengrass`). A single code path serves both;
+    the `#[cfg(not(feature="standalone"))] compile_error!` is removed. `raw_device_provider()` returning
+    `None` (no transport wired) is a fatal startup error.
+  - **The SITE half is always MQTT.** It stays `MqttProvider::connect_with_last_will`, independent of the
+    device-bus transport. The edgecommons `mqtt` provider module is gated behind `edgecommons/standalone`,
+    so the `greengrass` feature **builds on** `standalone` (`greengrass = ["standalone",
+    "edgecommons/greengrass"]`) — both the IPC provider (device bus) and the MQTT provider (site) are
+    compiled in.
+  - **The vestigial `messaging` field is removed from `BridgeConfig`.** It was only ever consumed by the
+    deleted `relay_primary_messaging()`; the runtime reads its own transport config from `--transport
+    MQTT <path>` (HOST) or needs none (IPC). Dropping it lets `GG_CONFIG` (which carries no `messaging`
+    section) parse. A `messaging` section in a HOST config is tolerated and ignored.
+  - **The `recipe.yaml` arg-grammar mismatch is resolved to the standard CLI** (closing the former
+    "Known validation gap"): the GREENGRASS `Run.Script` now invokes `--platform GREENGRASS --transport
+    IPC -c GG_CONFIG -t {iot:thingName}` — the real edgecommons CLI contract (`-c/--config` takes a
+    SOURCE keyword first). `src/main.rs` forwards argv verbatim (no synthesis), so the docs' former
+    "minimal `--config <file>` with internal synthesis" claim — which never matched `main.rs` and would
+    fail to parse — is corrected across the recipe and `docs/` to the standard-args form the e2e harness
+    already uses. IPC pubsub `accessControl` grants the bridge SUBSCRIBE + PUBLISH across the local UNS
+    surface (uplink class wildcards, own-device cmd downlink, the reply-proxy `edgecommons/reply-*`
+    topics, and the `_bcast` rehydration), modeled on the reference adapter recipes (`resources: ["*"]`);
+    no mqttproxy/TES, since the site link is a plain external MQTT socket, not Greengrass-brokered IoT
+    Core.
 
 ## Phase history (moved from README)
 
@@ -77,50 +111,36 @@ the P3-6 e2e is the bridge-level proof specifically).
 
 ## Still deferred (genuinely unbuilt)
 
-- **GREENGRASS/IPC-primary variant** (PRIMARY = Nucleus IPC, SITE = MQTT): the `greengrass` cargo
-  feature today only compiles the library's IPC provider; the IPC-primary relay wiring is the
-  follow-up, and GREENGRASS deployment validation rides it (HOST is proven by the e2e and
-  KUBERNETES by the boundary-bridge deploy of `deploy/site-broker/k8s/`).
 - Template substitution across the whole `component.instances[]` entry (the facade integration
   `src/config.rs` module docs mention).
-- A Rust-only library affordance exposing the runtime's raw `MessagingProvider` so the relay can
-  share the runtime's device-bus connection instead of holding a second client (see README "How it
-  connects" for why the relay cannot reuse the runtime's connection today without a — deliberately
-  unmade — edgecommons core change).
 - Docs-site sync of this component's docs into the edgecommons website (this change adds
   `.github/workflows/deploy-docs.yml`, which triggers the sync on doc-only pushes once the repo's
   `CLOUDFLARE_DEPLOY_HOOK` secret is set — the trigger mechanism, not the first sync itself).
 
+## Validation run for the IPC-primary change
+
+- **HOST/standalone**: `cargo build`, `cargo test` (112 pass), `cargo clippy --all-targets` (clean),
+  and the coverage gate `cargo llvm-cov --ignore-filename-regex 'main\.rs' --fail-under-lines 90`
+  (95.5% lines) all green on Windows against the affordance worktree via the `.cargo` `[patch]`.
+- **GREENGRASS/IPC**: `cargo build --no-default-features --features greengrass` **links on WSL**
+  (Linux ELF binary produced) — the proof that the IPC-shared-primary path compiles, including the
+  Linux-only `aws-greengrass-component-sdk` C-FFI. On-device deploy to the lab is the orchestrator's
+  separate step.
+- **Lockfile**: `Cargo.lock` records `edgecommons` git-sourced at rev `6d836fe…` (not a path source),
+  re-resolved with the `[patch]` inactive per D-UB-1.
+
 ## Known validation gap
 
-- **`tests/e2e_dual_broker.rs` fails against the currently pinned core rev
-  (`36a70c48b65b35f77bfab70d3a73869debdfc407`), independent of this change.** The pinned rev's D-U28
-  "optional-instance" topic behavior makes `EdgeCommons::uns().topic(UnsClass::State)` (the
-  component-scope builder the bridge's own runtime/heartbeat uses) omit the instance segment —
-  `ecv1/{device}/uns-bridge/state`, not `ecv1/{device}/uns-bridge/main/state`. The e2e test's
-  readiness gate still hardcodes the pre-D-U28 `.../main/state` topic string, so it never observes
-  the bridge's own relayed heartbeat and times out after 60 s waiting for it. This predates this PR
-  (verified against a clean worktree with no source changes beyond the lockfile) and is unrelated to
-  the baseline-adoption items (WS-1/2/3/4/5/7) implemented here. It blocks running the gated e2e as
-  live validation for this change; a corrected topic expectation (and, depending on intent, whether
-  the D-U28 dual-scope subscriptions `src/io.rs` already carries should also update the bridge's own
-  emitted own-identity topics to the instance-scoped form) is tracked as a follow-up, not fixed in
-  this PR.
-- **`recipe.yaml`'s GREENGRASS `Run.Script` invokes the binary with `--config <path> --thing
-  <name>`, which does not match the standard edgecommons CLI grammar the docs describe.** `-c/
-  --config` is one flag (both spellings resolve to the same clap arg) and requires its first value
-  to be a source keyword — `FILE`, `CONFIGMAP`, `ENV`, `GG_CONFIG`, `SHADOW`, or `CONFIG_COMPONENT`
-  — followed by that source's own args, e.g. `--config FILE /path/to/config.json`; a bare path
-  after `--config` fails to parse as an unknown config source. `src/main.rs` forwards
-  `std::env::args_os()` to `EdgeCommonsBuilder` verbatim — it does not pre-process or synthesize
-  argv — so nothing in this binary rewrites a minimal `--config <path> --thing <name>` invocation
-  into the full form. `docs/reference/configuration.md`, `docs/explanation.md`, and
-  `docs/reference/messaging-interface.md` all describe a minimal-CLI-with-internal-synthesis
-  design that is not implemented in `src/main.rs` as shipped. Since GREENGRASS deployment of this
-  bridge is itself a still-deferred variant (see above) this mismatch has apparently never been
-  exercised live. Resolving it (implement the described synthesis in `main.rs`, or correct the docs
-  and `recipe.yaml` to the full standard-args form) is a design decision outside this baseline-
-  adoption change's scope (WS-1/2/3/4/5/7) — flagged here rather than guessed at.
+- **`tests/e2e_dual_broker.rs` (the gated live dual-EMQX HOST proof) was NOT run for this change**,
+  and it has a pre-existing readiness-gate defect independent of it. The test's readiness gate
+  hardcodes the pre-D-U28 `ecv1/{device}/uns-bridge/main/state` topic, but the D-U28 "optional-
+  instance" topic behavior makes `EdgeCommons::uns().topic(UnsClass::State)` (the component-scope
+  builder the bridge's own runtime/heartbeat uses) omit the instance segment
+  (`ecv1/{device}/uns-bridge/state`), so the gate never observes the bridge's own relayed heartbeat
+  and times out. This predates the IPC-primary work and is unrelated to the shared-provider wiring
+  (which the unit suite exercises against the in-memory fake). A corrected topic expectation is a
+  follow-up. The GREENGRASS/IPC on-device regression is likewise the orchestrator's lab step, not run
+  here.
 
 ## Config
 
