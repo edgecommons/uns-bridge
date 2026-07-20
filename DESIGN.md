@@ -84,6 +84,20 @@ baseline-adoption and packaging decisions specific to this repo — not a restat
     topics, and the `_bcast` rehydration), modeled on the reference adapter recipes (`resources: ["*"]`);
     no mqttproxy/TES, since the site link is a plain external MQTT socket, not Greengrass-brokered IoT
     Core.
+- **D-UB-7 (GREENGRASS IPC stream ceiling — raised to 64 in the committed build).** The
+  `aws-greengrass-component-sdk` C-FFI compiles `GG_IPC_MAX_STREAMS` with a default of **16** (an
+  `#ifndef` guard). The relay opens **more** concurrent IPC subscription streams than that (~18: the
+  six/seven uplink class wildcards, both D-U28 subscription scopes, the own-device `cmd` downlink scopes,
+  and the per-request reply-proxy reply topics), so on a Nucleus the extra streams are rejected (NOMEM)
+  and the component crash-loops on start. The **committed greengrass build raises the ceiling to 64**:
+  `build.sh` (the gdk `custom_build_command` that produces the shipped artifact) exports
+  `CFLAGS`/`TARGET_CFLAGS` `-DGG_IPC_MAX_STREAMS=64` before `cargo build --features greengrass` whenever
+  the feature set includes `greengrass`, so the SDK's `cc` build picks it up automatically and the shipped
+  artifact is deployable with **no deploy-time env**. 64 is comfortable headroom over the ~18 the relay
+  uses; the shared-stream-budget tradeoff is accepted (maintainer decision). Validated on `lab-5950x`: the
+  as-shipped default-16 build crash-looped (NOMEM → exit 1); with the ceiling at 64 the Scenario-B
+  bridge-over-IPC round-trip completed. **Any local greengrass dev build must go through `build.sh`** (or
+  export the same define) to get the raise — a plain `cargo build --features greengrass` does not set it.
 
 ## Phase history (moved from README)
 
@@ -122,10 +136,12 @@ the P3-6 e2e is the bridge-level proof specifically).
 - **HOST/standalone**: `cargo build`, `cargo test` (112 pass), `cargo clippy --all-targets` (clean),
   and the coverage gate `cargo llvm-cov --ignore-filename-regex 'main\.rs' --fail-under-lines 90`
   (95.5% lines) all green on Windows against the affordance worktree via the `.cargo` `[patch]`.
-- **GREENGRASS/IPC**: `cargo build --no-default-features --features greengrass` **links on WSL**
-  (Linux ELF binary produced) — the proof that the IPC-shared-primary path compiles, including the
-  Linux-only `aws-greengrass-component-sdk` C-FFI. On-device deploy to the lab is the orchestrator's
-  separate step.
+- **GREENGRASS/IPC**: the greengrass build **links on WSL** (Linux ELF binary produced) — the proof
+  that the IPC-shared-primary path compiles, including the Linux-only `aws-greengrass-component-sdk`
+  C-FFI. Building through the committed `build.sh` (`EDGECOMMONS_FEATURES=greengrass`) with no manual
+  env confirmed the D-UB-7 `GG_IPC_MAX_STREAMS=64` raise is applied automatically (the define appears in
+  the SDK's `cc` build). On-device: the default-16 build crash-looped and the ceiling-64 build completed
+  the Scenario-B bridge-over-IPC round-trip on `lab-5950x`.
 - **Lockfile**: `Cargo.lock` records `edgecommons` git-sourced at rev `6d836fe…` (not a path source),
   re-resolved with the `[patch]` inactive per D-UB-1.
 

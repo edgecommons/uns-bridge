@@ -45,6 +45,13 @@ site broker. `test-configs/config.json` carries a runnable dual-broker example.
   add tests.
 - `bash tests/e2e/run.sh` (`UNS_BRIDGE_E2E=1`, gated `#[ignore]`) is the live dual-EMQX relay proof
   against two real brokers. See `DESIGN.md` "Known validation gap" for its current status.
+- **GREENGRASS builds go through `build.sh`** (`EDGECOMMONS_FEATURES=greengrass`, the gdk
+  `custom_build_command`), not a bare `cargo build --features greengrass`. `build.sh` raises the SDK's
+  `GG_IPC_MAX_STREAMS` to 64 via `CFLAGS`/`TARGET_CFLAGS` because the relay opens ~18 concurrent IPC
+  subscription streams — more than the `aws-greengrass-component-sdk` default of 16, which otherwise
+  crash-loops the component on the Nucleus (NOMEM). A local greengrass dev build that skips `build.sh`
+  must export the same `-DGG_IPC_MAX_STREAMS=64`. See `DESIGN.md` D-UB-7. (The IPC provider is Linux-only
+  C-FFI, so build on Linux/WSL.)
 - `edgecommons component validate` checks this repo's config against `config.schema.json` and warns
   if `Cargo.lock` is not committed (it is — see `DESIGN.md` D-UB-1 for the regeneration discipline).
 
