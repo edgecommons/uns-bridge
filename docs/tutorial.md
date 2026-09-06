@@ -53,10 +53,10 @@ own uplink filter* and therefore rides its own relay to the site bus. Subscribe 
 class on the **site** broker (`:1884`):
 
 ```bash
-mosquitto_sub -p 1884 -t 'ecv1/+/+/+/state' -v
+mosquitto_sub -p 1884 -t 'ecv1/+/+/state' -t 'ecv1/+/+/+/state' -v
 ```
 
-Within ~5 s you'll see `ecv1/gw-01/uns-bridge/main/state` arrive **on the site broker** even though the
+Within ~5 s you'll see `ecv1/gw-01/uns-bridge/state` arrive **on the site broker** even though the
 bridge published it on the *device* broker. The payload is a protobuf `EdgeCommonsMessage`, so the CLI may show
 binary output rather than readable JSON. After decode, the diagnostic projection includes
 `tags._relay: ["gw-01/uns-bridge"]` — the hop tag the bridge stamped as it forwarded. That tag is the bridge's
@@ -84,56 +84,46 @@ Publish the reading from the EdgeCommons producer. It appears on the site broker
 that's what "topic-verbatim" means — with the hop tag appended after protobuf decode/re-encode. Foreign
 payloads that are not protobuf EdgeCommons messages do not relay on these normal UNS paths.
 
-## 6. Bring a command down
+## 6. Watch commands on the device bus
 
-Commands flow the other way — from the site bus down to the device — and only for **this** device.
-Subscribe the device bus for commands, then send one with an EdgeCommons site-side client:
-
-```bash
-# terminal A — watch the device bus
-mosquitto_sub -p 1883 -t 'ecv1/gw-01/+/+/cmd/#' -v
-```
-
-It arrives on the device bus, hop-tagged, as protobuf bytes. The **device pinning** rule is the same: a command
-for a different device (`ecv1/gw-99/...`) never reaches `gw-01`'s device bus because the downlink filter is
-pinned to `ecv1/gw-01/+/+/cmd/#`. A bridge only pulls down commands addressed to its own device (which is also
-exactly what the site broker's per-device ACL allows it to read).
-
-## 7. Prove request/reply survives the crossing
-
-This is the subtle one. A site-side requester sets `header.reply_to` to a topic **on the site broker**; a
-device-side responder would naively reply onto the *device* bus, where the requester isn't listening. The
-bridge proxies the whole path. With an EdgeCommons client this is one `request()` call across the bridge. The
-command and reply are both decoded as protobuf, mutated, and re-encoded by the bridge:
+Watch both topic scopes on the device broker in another terminal:
 
 ```bash
-# site side: subscribe your own reply topic on the SITE bus if you want to watch the returned bytes
-mosquitto_sub -p 1884 -t 'edgecommons/reply-demo' -v
+mosquitto_sub -p 1883 -t 'ecv1/gw-01/+/cmd/#' -t 'ecv1/gw-01/+/+/cmd/#' -v
 ```
 
-Watch your device-bus `cmd` subscriber (terminal A from step 6): after protobuf decode, the relayed command's
-`reply_to` is **not** `edgecommons/reply-demo` — the bridge rewrote it to a fresh `edgecommons/reply-...` topic
-it minted and subscribed **on the device bus**. When the device responds on that bridge topic, your
-`edgecommons/reply-demo` subscriber on the **site** bus receives the reply — `correlation_id` and body intact,
-`reply_to` stripped, hop tag appended. That is the correlation map at work.
+The payloads are protobuf bytes. Both downlink filters are pinned to `gw-01`; commands for another
+device do not reach this device bus.
 
-For a fully repeatable local proof of telemetry uplink, command downlink, request/reply, loop-drop, and opaque
-body preservation, use the bundled e2e harness:
+## 7. Verify a request/reply round trip
+
+Install [ec-uns-cmd](https://github.com/edgecommons/ec-uns-cmd) and put it on `PATH`. Run this
+command against the **site** broker. The bridge's own runtime on the device bus answers `ping`;
+the relay proxies its reply back to the site-side caller:
 
 ```bash
-bash tests/e2e/run.sh
+ec-uns-cmd --broker localhost:1884 --device gw-01 --component uns-bridge ping --timeout 10
 ```
+
+The tool subscribes before publishing and prints the successful reply's `result` as JSON. The device
+watcher sees the downlink `cmd`; its decoded `reply_to` names a bridge-minted device-bus topic.
+The bridge forwards the first reply to the original site reply topic and removes that temporary
+subscription. A timeout is a failed check, not evidence of success.
+
+`cargo test` covers the pure relay rules without brokers. The dual-broker harness in `tests/e2e/`
+is a separate live gate; consult [DESIGN.md](../DESIGN.md) for its validation record before relying
+on old results. This documentation review did not rerun it.
 
 ## 8. See the disconnect story
 
 Stop the **site** broker (`docker stop uns-site-broker`) and publish a couple of protobuf `evt` messages and a
 couple of protobuf `data` messages on the device bus. The bridge logs that the site link is down: the `data`
 messages are
-**dropped** (the live UNS path is deliberately not durable), but the `evt` messages are **buffered**
-(events/alarms must survive a WAN blip). Start the site broker again (`docker start uns-site-broker`); on the
+**dropped**, but the `evt` messages are **buffered** in a bounded memory-only queue. Overflow evicts
+the oldest event, and process exit loses the queue. Start the site broker again (`docker start uns-site-broker`); on the
 reconnect rising edge the bridge publishes its two rehydration broadcasts on the device bus and then
 **replays the buffered `evt`, in order**, to the site broker. Watch your site-side `evt` subscriber
-(`ecv1/+/+/+/evt/#`) to see them arrive after the reconnect.
+(`ecv1/+/+/evt/#` and `ecv1/+/+/+/evt/#`) to see them arrive after the reconnect.
 
 ## 9. Shut down cleanly
 

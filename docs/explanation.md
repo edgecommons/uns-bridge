@@ -6,14 +6,14 @@ This page is the mental model. For exact options see [reference/](reference/); f
 ## The problem it solves
 
 The [Unified Namespace](reference/messaging-interface.md) (UNS) gives every message a globally-meaningful
-topic — `ecv1/{device}/{component}/{instance}/{class}[/channel]`. But *physically* each device has its own
+topic — `ecv1/{device}/{component}[/{instance}]/{class}[/channel]`. But *physically* each device has its own
 bus: a local MQTT broker on a HOST/Docker device, the Nucleus IPC bus on a Greengrass core. Those buses do
 not see each other. A site-wide consumer — a historian recording every device, an MES integration, the edge
 console — would otherwise have to open a connection to every device's broker and know each one's address.
 
 The `uns-bridge` makes the *logical* UNS a *real, single* bus. Deploy **one bridge per device bus**; each
 subscribes its device's UNS traffic and republishes it, **topic-verbatim**, onto a shared **site broker**
-under the device's own namespace. Now the historian connects to one bus and subscribes six wildcards to see
+under the device's own namespace. Now the historian connects to one bus and subscribes twelve scope filters to see
 the whole plant. Commands flow the other way: the bridge pulls down commands the site addresses to *its*
 device.
 
@@ -78,11 +78,11 @@ flowchart LR
 ```
 
 - **Uplink (device → site)** relays the **six consumer classes** — `state`, `cfg`, `evt`, `metric`, `data`,
-  `log` — the same six wildcards a fleet consumer subscribes. A seventh class, `app`, is **opt-in** (default
-  off; off also means its filter is never even subscribed). `cmd` is **never** uplinked — there is no
+  `log` — twelve filters cover their component and instance scopes. A seventh class, `app`, adds two filters when **opted in** (default
+  off; off also means neither app filter is subscribed). `cmd` is **never** uplinked — there is no
   cross-device request/reply, so the only requests crossing the bridge originate on the site side.
 - **Downlink (site → device)** relays `cmd` **only**, and only for **this bridge's own device** — the
-  downlink filter is pinned to `ecv1/{device}/+/+/cmd/#`. A bridge must pull down only commands addressed to
+  downlink filters are pinned to `ecv1/{device}/+/cmd/#` and `ecv1/{device}/+/+/cmd/#`. A bridge must pull down only commands addressed to
   its device, which is also exactly the scope its site-broker ACL grants it.
 
 That the uplink set and the downlink set are **disjoint** is not incidental. A `cmd` the bridge relays down
@@ -166,7 +166,7 @@ event capture is, again, the streaming subsystem.
 Because the UNS is not retained (no MQTT retained messages), a consumer that connects *after* a device
 announced its `state`/`cfg` would otherwise see nothing until the next natural re-announce. On the
 **rising edge** of a site reconnect, the bridge publishes two notification-style broadcasts on the **device
-bus** — `ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg` — *before* it replays the
+bus** — `ecv1/{device}/_bcast/cmd/republish-state` and `…/republish-cfg` — *before* it replays the
 `evt` buffer. The `_bcast` pseudo-component rides the `+` component position of the downlink filter, so every
 device component re-announces its `state` keepalive and effective `cfg`, which then ride the uplink so the
 site view rehydrates without retain.
@@ -179,7 +179,7 @@ wiring. A reconnecting bridge's rehydration completes automatically, without rel
 
 Nothing about the bridge's health is bespoke. Its heartbeat publishes its `state` keepalive; its `cfg`
 publisher announces its redacted effective config; and every **30 s** a task snapshots the relay counters and
-emits them through `gg.metrics()` on the UNS `metric` class (`ecv1/{device}/uns-bridge/main/metric/<name>`).
+emits them through `gg.metrics()` on the UNS `metric` class (`ecv1/{device}/uns-bridge/metric/<name>`).
 All of it matches the uplink filters and is relayed by the bridge itself. Counters emit **interval deltas**
 (so they sum correctly in CloudWatch/EMF); two gauges — `relay_pending_replies` and `site_connected` — emit
 current values. See [reference/metrics.md](reference/metrics.md) for the full table.

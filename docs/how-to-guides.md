@@ -56,7 +56,7 @@ a Last-Will on the site connection that publishes a protobuf EdgeCommons `state`
 `status:"UNREACHABLE"` on the bridge's **own state topic**, so a site console watching
 `ecv1/+/+/+/state` sees the device go dark immediately.
 
-The topic is derived from the resolved runtime identity: `ecv1/{device}/uns-bridge/main/state`. Do not add an
+The topic is derived from the resolved runtime identity: `ecv1/{device}/uns-bridge/state`. Do not add an
 `lwt` object under `component.instances[site]`; the bridge rejects it because this is a private bridge-console
 contract and a misconfigured topic would break console reachability.
 
@@ -77,7 +77,8 @@ Every uplinkable class can be switched off; a disabled class's messages are drop
 - **`app` is opt-in** — off by default, and off means its filter is never even subscribed.
 - **`log` is on by the code default**, but the bundled sample config sets it **off** — set
   `"log": { "enabled": false }` unless you really want log tailing to cross the site link.
-- The six consumer classes (`state`, `cfg`, `evt`, `metric`, `data`) are on by default.
+- The six runtime classes (`state`, `cfg`, `evt`, `metric`, `data`, `log`) are on by default,
+  with component and instance filters for each (the sample configuration disables `log`).
 - `cmd` is not on this list — it is never uplinked and has no policy knob.
 
 ---
@@ -220,13 +221,13 @@ test is
 ## Observe the bridge's health and throughput
 
 - **Metrics** — every 30 s the bridge publishes relay counters as `metric`s on
-  `ecv1/{device}/uns-bridge/main/metric/<name>` (with the sample's `metricEmission.target: messaging`).
+  `ecv1/{device}/uns-bridge/metric/<name>` (with the sample's `metricEmission.target: messaging`).
   Watch `relay_uplinked` / `relay_downlinked` for throughput, `relay_dropped_*` for policy drops,
   `relay_loop_dropped` for loop protection firing, `relay_reply_relayed` / `relay_reply_expired` for the
   reply proxy, `relay_evt_buffered` / `relay_evt_replayed` for disconnect handling, and the gauges
   `relay_pending_replies` and `site_connected` for live state. Full table:
   [reference/metrics.md](reference/metrics.md).
-- **State keepalive** — the bridge's own `state` on `ecv1/{device}/uns-bridge/main/state` every ~5 s; the
+- **State keepalive** — the bridge's own `state` on `ecv1/{device}/uns-bridge/state` every ~5 s; the
   site LWT flips it to `UNREACHABLE` on an abrupt death.
 - **Logs** — startup logs the resolved identity, hop id, filter counts, and the active uplink policy
   (disabled classes, rate-capped classes, evt buffer size); shutdown logs a one-line tally of every counter.

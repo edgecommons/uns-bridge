@@ -32,22 +32,22 @@ The standard edgecommons envelope is encoded as protobuf. The bridge only ever r
 replies) and `tags` (for the hop tag); `identity` and `body` travel untouched. In particular, envelope `tags`
 are orthogonal metadata and are unrelated to the opaque/application payload carried in `body`.
 
-```jsonc
-// Diagnostic JSON projection after protobuf decode, not wire bytes.
+Human-readable JSON projection of an EdgeCommons protobuf message. Normal MQTT and Greengrass IPC messaging carries protobuf bytes, not this JSON text.
+
+```json
 {
   "header": {
-    "name": "reload-config",                 // the message/verb name
-    "version": "1.0",
-    "uuid": "…", "timestamp": "…",
-    "correlation_id": "corr-1",               // preserved verbatim across the bridge
-    "reply_to": "edgecommons/reply-<uuid>"      // REWRITTEN on downlink; DROPPED on the reply back-haul
+    "name": "ping", "version": "1.0",
+    "timestamp": "2026-07-03T12:00:00Z", "timestamp_ms": 1783080000000,
+    "uuid": "5db5b842-6f46-48ea-a8ce-d5ff580c956c",
+    "correlation_id": "corr-1", "reply_to": "edgecommons/reply-12ab"
   },
-  "identity": { "hier": [ … ], "path": "dallas/gw-01", "component": "opcua-adapter", "instance": "main" },
-  "tags": {
-    "site": "dallas",                          // arbitrary business metadata — untouched
-    "_relay": [ "gw-01/uns-bridge" ]           // the RESERVED hop tag the bridge appends
+  "identity": {
+    "hier": [{"level": "device", "value": "gw-01"}],
+    "path": "gw-01", "component": "command-client"
   },
-  "body": { … }                                // untouched
+  "tags": {"_relay": ["gw-01/uns-bridge"]},
+  "body": {}
 }
 ```
 
@@ -98,17 +98,17 @@ not proxied as opaque transport bytes.
 
 ## The UNS class taxonomy (what routes where)
 
-Routing is by the **class** token — the 5th topic level (`ecv1/{device}/{component}/{instance}/{class}`). The
+Routing is by the **class** token — the fourth topic level at component scope and fifth at instance scope (`ecv1/{device}/{component}[/{instance}]/{class}`). The
 eight closed UNS classes, and how the bridge treats each:
 
 | Class | Leaf/Channeled | Reserved? (library-owned publish) | Uplink (device→site) | Downlink (site→device) |
 |-------|----------------|-----------------------------------|----------------------|------------------------|
-| `state` | leaf | reserved | ✅ always | — |
-| `cfg` | leaf | reserved | ✅ always | — |
-| `evt` | channeled | open | ✅ always (+ disconnect replay buffer) | — |
-| `metric` | channeled | reserved | ✅ always | — |
-| `data` | channeled | open | ✅ always | — |
-| `log` | channeled | reserved | ✅ always (default; sample disables) | — |
+| `state` | leaf | reserved | ✅ enabled by default | — |
+| `cfg` | leaf | reserved | ✅ enabled by default | — |
+| `evt` | channeled | open | ✅ enabled by default (+ disconnect replay buffer) | — |
+| `metric` | channeled | reserved | ✅ enabled by default | — |
+| `data` | channeled | open | ✅ enabled by default | — |
+| `log` | channeled | reserved | ✅ enabled by default (default; sample disables) | — |
 | `app` | channeled | open | ⚙️ opt-in (default off) | — |
 | `cmd` | channeled | open | ❌ never | ✅ own-device only |
 
@@ -122,10 +122,19 @@ eight closed UNS classes, and how the bridge treats each:
 ## The rehydration broadcast envelope
 
 On a site-reconnect rising edge the bridge publishes two notification-style `cmd` envelopes on the device bus
-(`ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg`):
+(`ecv1/{device}/_bcast/cmd/republish-state` and `…/republish-cfg`):
 
-```jsonc
-{ "header": { "name": "republish-state", "version": "1.0" }, "body": {} }
+Human-readable JSON projection of an EdgeCommons protobuf message. Normal MQTT and Greengrass IPC messaging carries protobuf bytes, not this JSON text.
+
+```json
+{
+  "header": {
+    "name": "republish-state", "version": "1.0",
+    "timestamp": "2026-07-03T12:00:00Z", "timestamp_ms": 1783080000000,
+    "uuid": "91f737a8-711e-4818-a634-367527ff09b6"
+  },
+  "body": {}
+}
 ```
 
 They carry **no** `identity`, **no** `tags`, and **no** `reply_to` — fire-and-forget. Each device component
@@ -140,12 +149,12 @@ derived by the bridge, not configured:
 
 | Field | Value |
 |-------|-------|
-| topic | `ecv1/{device}/uns-bridge/main/state` (the bridge's resolved state topic) |
+| topic | `ecv1/{device}/uns-bridge/state` (the bridge's resolved state topic) |
 | payload | protobuf EdgeCommons `state` envelope from the bridge identity |
 | body | `{ "status": "UNREACHABLE" }` |
 | qos | `1` |
 
-Because the will lands on the bridge's own `state` topic, a site console tracking `ecv1/+/+/+/state` sees the
+Because the will lands on the bridge's own `state` topic, a site console tracking both `ecv1/+/+/state` and `ecv1/+/+/+/state` sees the
 whole device flip to UNREACHABLE on an abrupt bridge/device death — no bespoke plumbing.
 
 ## Metric value shapes

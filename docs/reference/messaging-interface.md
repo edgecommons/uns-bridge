@@ -10,22 +10,23 @@ client recipes, the [how-to guides](../how-to-guides.md).
 All addressing follows the **Unified Namespace**. A concrete topic is:
 
 ```
-ecv1[/{site}]/{device}/{component}/{instance}/{class}[/{channel…}]
+ecv1/{device}/{component}[/{instance}]/{class}[/{channel…}]
 ```
 
 - `ecv1` — the fixed UNS root literal.
-- `{site}` — present **only** under the rooted grammar (`topic.includeRoot: true` **and** a multi-level
-  hierarchy). The bridge relays the **rootless** grammar (`topic.includeRoot: false`, the default).
+- The bridge relays the **rootless** grammar (`topic.includeRoot: false`). Topics with an enterprise
+  root are outside this relay contract.
 - `{device}` — the resolved Thing name (the last `hierarchy` level).
 - `{component}` — the component short name (the bridge's own is `uns-bridge`; the reserved broadcast
   pseudo-component is `_bcast`).
-- `{instance}` — a component instance id, or `main`.
+- `{instance}` — optional configured instance id. Component scope omits this segment and
+  `identity.instance`; literal `main` is an ordinary instance id, not a sentinel.
 - `{class}` — one of the eight closed classes (below).
 - `{channel…}` — 1–3 further tokens for channeled classes; **absent** for leaf classes (`state`, `cfg`).
 
 Tokens forbid `/ + # \` and control characters and the `..` sequence; topics cap at 7 `/` separators (AWS IoT
 Core's 8-level limit) and 256 UTF-8 bytes. The bridge builds every filter/topic through the library
-(`Uns::filter` / `Uns::topic_for`), so a bad device token fails at **startup**, not at subscribe time.
+(`Uns::filter_scoped` / `Uns::topic_for`), so a bad device token fails at **startup**, not at subscribe time.
 
 ## The eight UNS classes
 
@@ -45,21 +46,21 @@ the relay, which forwards below the guard.
 
 ## The relay matrix
 
-This is the whole routing contract. **Uplink** subscribes six wildcards on the device bus and republishes each
-valid edgecommons protobuf message, topic-verbatim, on the site broker; **downlink** subscribes one pinned
-filter on the site broker and republishes valid protobuf commands on the device bus.
+**Uplink** subscribes twelve filters for six runtime classes, covering component and instance scope.
+Enabling `app` adds two more filters, for fourteen. **Downlink** subscribes two own-device command
+filters. Valid protobuf messages retain their topics across the relay.
 
 | Direction | Classes relayed | Subscription filter(s) | Republished to |
 |-----------|-----------------|------------------------|----------------|
-| **Uplink** (device → site) | `state`, `cfg`, `evt`, `metric`, `data`, `log` (six consumer classes); `app` opt-in | `ecv1/+/+/+/state` · `ecv1/+/+/+/cfg` · `ecv1/+/+/+/evt/#` · `ecv1/+/+/+/metric/#` · `ecv1/+/+/+/data/#` · `ecv1/+/+/+/log/#` (+ `ecv1/+/+/+/app/#` when `app` enabled) | the **identical topic** on the site broker, protobuf envelope decoded, hop tag appended, then re-encoded |
-| **Downlink** (site → device) | `cmd` only, **pinned to this bridge's own device** | `ecv1/{device}/+/+/cmd/#` | the **identical topic** on the device bus, hop tag appended |
+| **Uplink** (device → site) | `state`, `cfg`, `evt`, `metric`, `data`, `log`; `app` opt-in | Twelve filters listed below; add `ecv1/+/+/app/#` and `ecv1/+/+/+/app/#` when enabled | the **identical topic** on the site broker, protobuf envelope decoded, hop tag appended, then re-encoded |
+| **Downlink** (site → device) | `cmd` only, **pinned to this bridge's own device** | `ecv1/{device}/+/cmd/#` and `ecv1/{device}/+/+/cmd/#` | the **identical topic** on the device bus, hop tag appended |
 
 Notes:
 
 - **Leaf filters have no `/#`** (`state`, `cfg` end at the class token); channeled filters do. This is why the
   `state`/`cfg` filters look different from the rest.
 - The downlink filter's `+` in the component position also matches the reserved **`_bcast`** pseudo-component,
-  so `ecv1/{device}/_bcast/main/cmd/republish-*` is relayed like any other own-device `cmd`.
+  so `ecv1/{device}/_bcast/cmd/republish-*` is relayed like any other own-device `cmd`.
 - **`cmd` is never uplinked** (no cross-device request/reply). The uplink set ∩ downlink set = ∅, which
   prevents a single bridge from matching its own downlink as uplink. Non-protobuf payloads are not a fallback
   relay path; they are dropped as malformed.
@@ -67,12 +68,16 @@ Notes:
   (defense against a misconfigured broker ACL); a message that fails re-check is dropped and counted
   (`ClassNotRelayed` / `NotOwnDevice` / `NotUnsTopic` → `relay_routed_dropped`).
 
-A **site-side fleet consumer** subscribes the same six wildcards on the site broker and sees every bridged
+A **site-side fleet consumer** subscribes the same twelve runtime filters on the site broker and sees every bridged
 device with zero per-device knowledge:
 
 ```text
-ecv1/+/+/+/state     ecv1/+/+/+/cfg      ecv1/+/+/+/evt/#
-ecv1/+/+/+/metric/#  ecv1/+/+/+/data/#   ecv1/+/+/+/log/#
+ecv1/+/+/state       ecv1/+/+/+/state
+ecv1/+/+/cfg         ecv1/+/+/+/cfg
+ecv1/+/+/evt/#       ecv1/+/+/+/evt/#
+ecv1/+/+/metric/#    ecv1/+/+/+/metric/#
+ecv1/+/+/data/#      ecv1/+/+/+/data/#
+ecv1/+/+/log/#       ecv1/+/+/+/log/#
 ```
 
 ## What the bridge itself publishes
@@ -82,10 +87,10 @@ runtime's shared connection), which then rides its own uplink to the site:
 
 | Topic | Class | Cadence | What |
 |-------|-------|---------|------|
-| `ecv1/{device}/uns-bridge/main/state` | `state` | ~5 s (heartbeat) | The bridge's liveness keepalive. The private derived **site LWT** publishes `UNREACHABLE` here on abrupt death. |
-| `ecv1/{device}/uns-bridge/main/cfg` | `cfg` | on start / change | The bridge's effective (redacted) config. |
-| `ecv1/{device}/uns-bridge/main/metric/<name>` | `metric` | 30 s | The relay counters/gauges (below). |
-| `ecv1/{device}/_bcast/main/cmd/republish-state` · `…/republish-cfg` | `cmd` | site-reconnect rising edge | The rehydration broadcasts, on the **device bus** only (best-effort; device components answer via the library's `RepublishListener`). |
+| `ecv1/{device}/uns-bridge/state` | `state` | ~5 s (heartbeat) | The bridge's liveness keepalive. The private derived **site LWT** publishes `UNREACHABLE` here on abrupt death. |
+| `ecv1/{device}/uns-bridge/cfg` | `cfg` | on start / change | The bridge's effective (redacted) config. |
+| `ecv1/{device}/uns-bridge/metric/<name>` | `metric` | 30 s | The relay counters/gauges (below). |
+| `ecv1/{device}/_bcast/cmd/republish-state` · `…/republish-cfg` | `cmd` | site-reconnect rising edge | The rehydration broadcasts, on the **device bus** only (best-effort; device components answer via the library's `RepublishListener`). |
 | `edgecommons/reply-<uuid>` | (non-UNS) | per proxied request | A bridge-minted reply topic on the **device bus**, subscribed for one reply (see below). |
 
 ## Request/reply proxying
@@ -107,7 +112,7 @@ never touched — correlation survives inside the relayed envelope.
 ## Metrics
 
 Emitted every 30 s through `gg.metrics()`; with `metricEmission.target: messaging` they publish on the UNS
-`metric` class (`ecv1/{device}/uns-bridge/main/metric/<name>`) and ride the bridge's own relay to the site.
+`metric` class (`ecv1/{device}/uns-bridge/metric/<name>`) and ride the bridge's own relay to the site.
 Counters are **interval deltas**; gauges are **current** values. For every metric's measures, units,
 and diagnostic purpose, see
 [Reference - Metrics](metrics.md).
@@ -122,14 +127,14 @@ ACL-enforcing site broker.
 
 ## Startup, shutdown, and reconnection behavior
 
-- **Startup order:** edgecommons runtime (device bus, fatal if down) → relay's provider-level device-bus connection (fatal
-  if down) → derive the private site LWT topic from the bridge state topic → site connect (retried forever,
+- **Startup order:** EdgeCommons runtime (device bus, fatal if down) → share its raw device provider →
+  derive the private site LWT topic from the bridge state topic → site connect (retried forever,
   ~5 s between tries; abandonable by a shutdown signal) → subscribe all filters → `relay running`.
 - **Intermittent uplink:** the site connect retries in the bridge's own loop; the provider re-subscribes every
   filter on each reconnect, so recovery is transparent. A dead **device** bus is fatal (the bridge is useless
   without it); a dead **site** bus is not.
 - **Shutdown (Ctrl-C / SIGTERM):** aborts every pump (incl. the TTL sweep and per-reply pumps), then
-  **unsubscribes every filter at both brokers** — the six/seven uplink filters, the downlink filter, and every
+  **unsubscribes every filter at both brokers** — the twelve/fourteen uplink filters, the two downlink filters, and every
   still-pending bridge reply topic — before exit, and logs a one-line counter tally. Unreplayed buffered `evt`
   is discarded (memory-only by design).
 

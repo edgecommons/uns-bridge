@@ -29,7 +29,7 @@ The bridge's **own** UNS identity comes from `hierarchy`/`identity` + `-t/--thin
 ```jsonc
 "hierarchy": { "levels": ["site", "device"] },
 "identity":  { "site": "dallas" }
-// with  --thing gw-01   →   state topic = ecv1/gw-01/uns-bridge/main/state
+// with  --thing gw-01   →   state topic = ecv1/gw-01/uns-bridge/state
 ```
 
 Do not configure an `lwt` block. The bridge derives the site Last-Will from that state topic and registers
@@ -83,11 +83,11 @@ uns-bridge --platform HOST --transport MQTT ./config.json -c FILE ./config.json 
 
 | Option | Effect |
 |--------|--------|
-| `hierarchy` / `identity` | Place the bridge in the UNS tree. With `--thing gw-01` the device token is `gw-01`; the bridge's own topics are `ecv1/gw-01/uns-bridge/main/...`. |
+| `hierarchy` / `identity` | Place the bridge in the UNS tree. With `--thing gw-01` the device token is `gw-01`; the bridge's own topics are `ecv1/gw-01/uns-bridge/...`. |
 | `messaging.local.host/port` | The **device** broker (HOST). The runtime connects here for the bridge's own state/cfg/metric, and the relay shares that same connection (via `gg.raw_device_provider()`) for the provider-level protobuf relay — one client, not two. |
 | `messaging.local.clientId` | The runtime's device-bus client id; the relay reuses the same connection, so there is no second client to collide with. |
 | `messaging.requestTimeoutSeconds` | The framework request deadline. Paired with `reply.ttlSecs` (defaulted here to 60 = 2×30). |
-| `heartbeat` | The bridge's own `state` keepalive on `ecv1/gw-01/uns-bridge/main/state` every 5 s — which matches the uplink `state` filter and rides the relay to the site. |
+| `heartbeat` | The bridge's own `state` keepalive on `ecv1/gw-01/uns-bridge/state` every 5 s — which matches the uplink `state` filter and rides the relay to the site. |
 | `metricEmission.target: messaging` | Publishes the 30 s relay counters on the UNS `metric` class, so they too ride the relay. |
 | `component.instances[site].siteBroker` | The **site** broker — the bridge's external system. Every uplinked message is republished here topic-verbatim. |
 | Derived site LWT | The bridge registers a protobuf EdgeCommons `state` envelope with `status:"UNREACHABLE"` on its own `state` topic on the site connection. This is not configurable. |
@@ -149,7 +149,7 @@ kept off the WAN, the `evt` buffer enlarged, and the reply TTL raised in step wi
 
 Note the device token here is `gw-01` even though `hierarchy` has four levels — the **last** level is always
 the resolved thing name (`--thing gw-01`); `site`/`area`/`line` come from `identity`. So the bridge's state
-topic, and therefore the private site LWT topic, is still `ecv1/gw-01/uns-bridge/main/state` (rootless
+topic, and therefore the private site LWT topic, is still `ecv1/gw-01/uns-bridge/state` (rootless
 grammar — the enterprise path rides the envelope `identity`, not the topic).
 
 ### How this config behaves
@@ -209,8 +209,26 @@ body:   protobuf EdgeCommonsMessage bytes
 
 If decoded for diagnostics, the message may project as:
 
-```jsonc
-{ "header": { ... }, "identity": { ... }, "body": { "value": 21.4, "quality": "GOOD" } }
+Human-readable JSON projection of an EdgeCommons protobuf message. Normal MQTT and Greengrass IPC messaging carries protobuf bytes, not this JSON text.
+
+```json
+{
+  "header": {
+    "name": "SouthboundSignalUpdate", "version": "1.0",
+    "timestamp": "2026-07-03T12:00:00Z", "timestamp_ms": 1783080000000,
+    "uuid": "5db5b842-6f46-48ea-a8ce-d5ff580c956c"
+  },
+  "identity": {
+    "hier": [{"level": "device", "value": "gw-01"}],
+    "path": "gw-01", "component": "opcua-adapter", "instance": "kep1"
+  },
+  "tags": {"site": "dallas"},
+  "body": {
+    "device": {"adapter": "opcua", "instance": "kep1", "endpoint": "opc.tcp://host:4840"},
+    "signal": {"id": "ns=2;s=Temperature", "name": "Temperature", "address": {"ns": 2, "signalId": "Temperature"}},
+    "samples": [{"value": 23.5, "quality": "GOOD", "qualityRaw": "0x00000000", "sourceTs": "2026-07-03T12:00:00Z", "serverTs": "2026-07-03T12:00:00Z"}]
+  }
+}
 ```
 
 The bridge matches `ecv1/+/+/+/data/#`, re-checks class=`data` (relayed), decodes the protobuf envelope,
@@ -287,7 +305,7 @@ matters is keeping the TTL aligned with the request deadline:
 } ] }
 ```
 
-At runtime: a site console calls `request()` on `ecv1/gw-01/opcua-adapter/main/cmd/<verb>` with
+At runtime: a site console calls `request()` on `ecv1/gw-01/opcua-adapter/cmd/<verb>` with
 `header.reply_to = edgecommons/reply-<uuid>` (a topic on the *site* broker). The bridge:
 
 1. Mints a device-bus reply topic, subscribes it, rewrites the command's `reply_to` to it, records the
