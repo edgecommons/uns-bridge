@@ -136,7 +136,7 @@ own `identity` element and its real state topic:
 ```jsonc
 "hierarchy": { "levels": ["site", "device"] },
 "identity":  { "site": "dallas" }
-// with -t gw-01  →  state topic ecv1/gw-01/uns-bridge/main/state
+// with -t gw-01  →  state topic ecv1/gw-01/uns-bridge/state
 ```
 
 At startup the bridge derives that exact topic (`gg.uns().topic(State)`) and registers the site Last-Will on

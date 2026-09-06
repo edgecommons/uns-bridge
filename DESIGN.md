@@ -4,6 +4,13 @@
 > behavior, update the relevant section here in the same change, and review new work against what
 > is written here — not against a summary of it.
 
+Current documentation baseline (2026-09-06): the relay uses the runtime's shared device provider,
+protobuf decode/mutate/re-encode, optional instance scope, twelve runtime uplink filters (fourteen
+with `app`) and two own-device command filters. The maintained [messaging reference](docs/reference/messaging-interface.md)
+and [tutorial](docs/tutorial.md) describe those paths. Validation numbers and lab outcomes below
+belong to their recorded changes; this documentation review did not rerun them. The live dual-broker
+readiness defect documented below remains an unresolved test-helper gap.
+
 ## What it is
 
 `uns-bridge` (Greengrass component `com.mbreissi.edgecommons.UnsBridge`) is an EdgeCommons

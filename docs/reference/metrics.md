@@ -4,7 +4,7 @@ The UNS bridge emits relay metrics through the EdgeCommons metric service. With
 `metricEmission.target: messaging`, metrics are published on the reserved UNS `metric` class:
 
 ```text
-ecv1/{device}/uns-bridge/main/metric/{metricName}
+ecv1/{device}/uns-bridge/metric/{metricName}
 ```
 
 The bridge originates its own metrics on the device bus and then relays them to the site broker like

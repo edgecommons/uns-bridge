@@ -48,8 +48,9 @@ whole `tls-certs/` directory into the broker at `/opt/emqx/etc/certs`. `tls-cert
 (never commit generated key material, even dev-only).
 
 **Exercise the mTLS + ACL path** with any MQTT client that supports client certs (e.g.
-`mosquitto_pub`/`mosquitto_sub`, MQTTX, or the bridge itself). The walkthrough below is the exact
-sequence used to verify `acl.conf` against a real EMQX 5.8.2 while building this recipe (`-h
+`mosquitto_pub`/`mosquitto_sub`, MQTTX, or the bridge itself). These are **raw MQTT ACL probes**, not
+EdgeCommons messages: their native JSON payloads intentionally bypass the bridge and do not test
+protobuf relay behavior. The walkthrough adapts the historical EMQX 5.8.2 validation sequence (`-h
 localhost` needs no `--insecure`: the dev server cert's SAN covers `localhost`/`127.0.0.1`):
 
 ```bash
@@ -61,7 +62,7 @@ mosquitto_sub -h localhost -p 8884 \
 # Terminal 2 — gw-01 publishing into its OWN subtree: arrives in Terminal 1.
 mosquitto_pub -h localhost -p 8884 \
   --cafile tls-certs/ca.crt --cert tls-certs/client-gw-01.crt --key tls-certs/client-gw-01.key \
-  -t 'ecv1/gw-01/uns-bridge/main/state' -m '{"status":"test"}'
+  -t 'ecv1/gw-01/acl-probe/app/test' -m '{"status":"test"}'
 
 # gw-01 attempting a CROSS-DEVICE publish — the boundary. mosquitto_pub reports success (EMQX's
 # default deny_action=ignore returns a normal PUBACK even when it silently drops the message —
@@ -69,17 +70,17 @@ mosquitto_pub -h localhost -p 8884 \
 # absence, not a client-side error, is what "the ACL holds" looks like.
 mosquitto_pub -h localhost -p 8884 \
   --cafile tls-certs/ca.crt --cert tls-certs/client-gw-01.crt --key tls-certs/client-gw-01.key \
-  -t 'ecv1/gw-02/uns-bridge/main/state' -m '{"status":"should never arrive"}'
+  -t 'ecv1/gw-02/acl-probe/app/test' -m '{"status":"should never arrive"}'
 ```
 
 Two more worth knowing before you build against this ACL:
 
 ```bash
-# gw-01 subscribing to its own DOWNLINK cmd topic — allowed (this is the one topic shape a device
+# gw-01 subscribing to both own-device DOWNLINK cmd scopes — allowed (these are the topic shapes a device
 # bridge itself subscribes to on the site side, per the relay matrix, ../../README.md §2.2):
 mosquitto_sub -h localhost -p 8884 \
   --cafile tls-certs/ca.crt --cert tls-certs/client-gw-01.crt --key tls-certs/client-gw-01.key \
-  -t 'ecv1/gw-01/+/+/cmd/#' -v
+  -t 'ecv1/gw-01/+/cmd/#' -t 'ecv1/gw-01/+/+/cmd/#' -v
 
 # gw-01 subscribing to its own FULL subtree (not just cmd) — DENIED, and unlike a denied publish
 # this IS visible: mosquitto_sub -d shows "All subscription requests were denied" / SUBACK 0x80. A

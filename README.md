@@ -2,7 +2,7 @@
 
 **One `uns-bridge` per device bus**: an envelope-aware relay between the device-local bus and the
 **site UNS broker**, making the logical [Unified Namespace](https://github.com/edgecommons/edgecommons)
-(`ecv1/{device}/{component}/{instance}/{class}[/channel]`) a real **site-wide** bus. Each device has
+(`ecv1/{device}/{component}[/{instance}]/{class}[/channel]`) a real **site-wide** bus. Each device has
 its own bus (a local MQTT broker on HOST or GREENGRASS) with no cross-device visibility — the bridge
 subscribes the device's UNS traffic, republishes it **topic-verbatim** onto the site broker under the
 device's namespace, and relays commands back down. Any site-scoped
@@ -50,21 +50,24 @@ path serves both. The site half is always MQTT.
 - HOST: `uns-bridge --platform HOST --transport MQTT ./config.json -c FILE ./config.json -t gw-01`
 - GREENGRASS: deployed by `recipe.yaml` with `--platform GREENGRASS --transport IPC -c GG_CONFIG -t {iot:thingName}` (built with `--features greengrass`).
 
-The site uplink is intermittent by design (edge-first): the bridge comes up and serves the device
-bus while the WAN is down, retrying the site connect in its own loop (§1.4); the provider
-re-subscribes every filter on each CONNACK, so reconnection is transparent.
+The runtime starts device-bus observability before connecting the site broker. Relay pumps start
+only after the first site connection succeeds; while it is unavailable, the bridge retries it in its
+own loop. After startup, reconnect restores subscriptions and applies the disconnect policy below.
 
 ## The relay matrix (§2.2)
 
-| Direction | Classes | Filter | Republished |
-|---|---|---|---|
-| **Uplink** device → site | `state` `cfg` `evt` `metric` `data` `log` (six consumer wildcards; `app` opt-in, default **off**) | `ecv1/+/+/+/state` · `ecv1/+/+/+/cfg` · `ecv1/+/+/+/evt/#` · `ecv1/+/+/+/metric/#` · `ecv1/+/+/+/data/#` · `ecv1/+/+/+/log/#` | same topic string, on the site broker |
-| **Downlink** site → device | `cmd` only (broadcast rides the `+` component position → `_bcast`) | `ecv1/{device}/+/+/cmd/#` — **pinned to this bridge's own device** | same topic string, on the device bus |
+The bridge accepts rootless `ecv1/{device}/{component}[/{instance}]/{class}[/channel]` topics.
+Component scope omits the topic instance segment and `identity.instance`; literal `main` is an
+ordinary configured instance id, not a sentinel.
 
-Explicit non-flows (v1): `cmd` is never uplinked (no cross-device request/reply, D-B7); reply
-topics (`edgecommons/reply-…`, non-`ecv1`) never match a UNS filter and only cross via the §2.4
-correlation map (below). The uplink∩downlink class **disjointness** is also a structural guard
-against a single bridge matching its own downlink as uplink.
+| Direction | Classes | Filters | Republished |
+|---|---|---|---|
+| Uplink device → site | `state`, `cfg`, `evt`, `metric`, `data`, `log`; `app` opt-in (default off) | Twelve runtime filters: component and instance scope for each class; two more with `app` enabled | Identical topic on the site broker |
+| Downlink site → device | `cmd`, including `_bcast` | `ecv1/{device}/+/cmd/#` and `ecv1/{device}/+/+/cmd/#`, pinned to this device | Identical topic on the device bus |
+
+The [messaging reference](docs/reference/messaging-interface.md#the-relay-matrix) lists every filter.
+`cmd` never uplinks; non-UNS reply topics cross only through the correlation map. The disjoint class
+sets prevent the uplink from matching its own command downlink.
 
 ### Hop-tag loop protection (§2.3)
 
@@ -111,8 +114,8 @@ decision:
 
 - **Enable/disable** — any of the seven uplinkable classes can be switched off
   (`uplink.classes.<class>.enabled`); a disabled class's messages **drop + count**
-  (`dropped_disabled`, per class). Defaults: `app` **off** (opt-in — off also means the seventh
-  filter is never subscribed), every other class **on**. (§2.5 recommends shipping `log` off — the
+  (`dropped_disabled`, per class). Defaults: `app` **off** (its two scope filters are not subscribed),
+  every other class **on**. (§2.5 recommends shipping `log` off — the
   sample config does — but the code default keeps it on, matching the P3-2/P3-3 behavior.)
 - **Rate caps** — a token bucket per rate-capped class: `maxRatePerSec` refill, `burst` capacity
   (default `2×rate`; the bucket starts full). Over-cap traffic **drops** — never queues; the live
@@ -129,7 +132,7 @@ decision:
   down evicts the oldest (`evt_buffer_dropped`). A live `evt` arriving while older ones are still
   queued joins the queue rather than overtaking them.
 - **Reconnect rehydration** (DESIGN-uns §9.3 layer 2) — on the site-reconnect **rising edge** the
-  bridge publishes `ecv1/{device}/_bcast/main/cmd/republish-state` and `…/republish-cfg` on the
+  bridge publishes `ecv1/{device}/_bcast/cmd/republish-state` and `…/republish-cfg` on the
   **device bus** (best-effort, notification-style `cmd` envelopes, **before** the `evt` replay) so
   every component's re-announce can ride the uplink and the site view rehydrates `state`/`cfg`
   without retain. Startup is not an edge — the relay only starts after the site link is first
@@ -147,7 +150,7 @@ Nothing bespoke: the heartbeat publishes the bridge's `state` keepalive on the d
 site broker sees the bridge exactly as it sees any component (plus the private LWT only it sets).
 
 Every **30 s** a task snapshots the relay counters and emits them through `gg.metrics()`
-(`ecv1/{device}/uns-bridge/main/metric/<name>` with the shipped `messaging` target). Counters emit
+(`ecv1/{device}/uns-bridge/metric/<name>` with the shipped `messaging` target). Counters emit
 **interval deltas**, gauges the current value:
 
 | Metric | Measures | Kind |
